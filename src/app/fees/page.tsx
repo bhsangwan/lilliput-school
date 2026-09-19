@@ -11,6 +11,14 @@ type Child = {
   class_name: string
   parent_name: string | null
   parent_phone: string | null
+  family_id: string | null
+}
+
+type Family = {
+  id: string
+  family_name: string
+  primary_parent_name: string | null
+  primary_parent_phone: string | null
 }
 
 type Fee = {
@@ -23,7 +31,7 @@ type Fee = {
   last_payment_date: string | null
   due_date: string | null
   notes: string | null
-  children?: { full_name: string; class_name: string; parent_name: string | null; parent_phone: string | null }
+  children?: { full_name: string; class_name: string; parent_name: string | null; parent_phone: string | null; family_id: string | null }
 }
 
 type Payment = {
@@ -86,6 +94,7 @@ export default function FeesPage() {
   const [userName, setUserName] = useState('')
   const [role, setRole] = useState('')
   const [children, setChildren] = useState<Child[]>([])
+  const [families, setFamilies] = useState<Family[]>([])
   const [fees, setFees] = useState<Fee[]>([])
   const [payments, setPayments] = useState<Payment[]>([])
   const [loading, setLoading] = useState(true)
@@ -96,7 +105,6 @@ export default function FeesPage() {
   const [banner, setBanner] = useState<Banner>(null)
   const [saving, setSaving] = useState(false)
 
-  // Bulk generate
   const [showBulk, setShowBulk] = useState(false)
   const [bulkPlan, setBulkPlan] = useState<PlanType>('monthly')
   const [bulkMonth, setBulkMonth] = useState(currentMonth())
@@ -105,19 +113,17 @@ export default function FeesPage() {
   const [bulkAmount, setBulkAmount] = useState(String(MONTHLY_AMOUNT))
   const [bulkBusy, setBulkBusy] = useState(false)
 
-  // Filters
   const [filterPeriod, setFilterPeriod] = useState('')
   const [filterPlan, setFilterPlan] = useState<'' | PlanType>('')
   const [filterStatus, setFilterStatus] = useState('')
   const [filterClass, setFilterClass] = useState('')
+  const [filterFamily, setFilterFamily] = useState('')
   const [search, setSearch] = useState('')
   const [pendingOnly, setPendingOnly] = useState(false)
   const [showClassSummary, setShowClassSummary] = useState(false)
 
-  // Ledger expand
-  const [expandedFeeId, setExpandedFeeId] = useState<string | null>(null)
+  const [ledgerChildId, setLedgerChildId] = useState<string | null>(null)
 
-  // Payment modal
   const [payModalFee, setPayModalFee] = useState<Fee | null>(null)
   const [payAmount, setPayAmount] = useState('')
   const [payMethod, setPayMethod] = useState('Cash')
@@ -139,10 +145,16 @@ export default function FeesPage() {
 
       const { data: kids } = await supabase
         .from('children')
-        .select('id, full_name, class_name, parent_name, parent_phone')
+        .select('id, full_name, class_name, parent_name, parent_phone, family_id')
         .eq('is_active', true)
         .order('full_name')
       setChildren((kids as Child[]) || [])
+
+      const { data: fams } = await supabase
+        .from('families')
+        .select('id, family_name, primary_parent_name, primary_parent_phone')
+        .order('family_name')
+      setFamilies((fams as Family[]) || [])
 
       await loadAll()
       setLoading(false)
@@ -154,15 +166,13 @@ export default function FeesPage() {
   async function loadAll() {
     const { data: feeData, error: feeErr } = await supabase
       .from('fees')
-      .select('*, children(full_name, class_name, parent_name, parent_phone)')
+      .select('*, children(full_name, class_name, parent_name, parent_phone, family_id)')
       .order('month_year', { ascending: false })
     if (feeErr) { showBanner('error', feeErr.message); return }
     setFees((feeData as Fee[]) || [])
 
     const { data: payData, error: payErr } = await supabase
-      .from('fee_payments')
-      .select('*')
-      .order('paid_on', { ascending: false })
+      .from('fee_payments').select('*').order('paid_on', { ascending: false })
     if (payErr) { showBanner('error', payErr.message); return }
     setPayments((payData as Payment[]) || [])
   }
@@ -172,7 +182,6 @@ export default function FeesPage() {
     setTimeout(() => setBanner(null), 4000)
   }
 
-  // Map: fee_id → payments[]
   const paymentsByFee = useMemo(() => {
     const m = new Map<string, Payment[]>()
     payments.forEach(p => {
@@ -184,7 +193,6 @@ export default function FeesPage() {
     return m
   }, [payments])
 
-  // Sum of payments per fee
   const paidByFee = useMemo(() => {
     const m = new Map<string, number>()
     payments.forEach(p => {
@@ -194,7 +202,27 @@ export default function FeesPage() {
     return m
   }, [payments])
 
-  // ---------- FILTERS ----------
+  // Child TOTAL balance across all fee rows
+  const childTotals = useMemo(() => {
+    const m = new Map<string, { expected: number; paid: number; balance: number }>()
+    fees.forEach(f => {
+      const row = m.get(f.child_id) || { expected: 0, paid: 0, balance: 0 }
+      const amt = Number(f.amount)
+      const paid = paidByFee.get(f.id) || 0
+      row.expected += amt
+      row.paid += paid
+      row.balance += Math.max(amt - paid, 0)
+      m.set(f.child_id, row)
+    })
+    return m
+  }, [fees, paidByFee])
+
+  const familyById = useMemo(() => {
+    const m = new Map<string, Family>()
+    families.forEach(f => m.set(f.id, f))
+    return m
+  }, [families])
+
   const availablePeriods = useMemo(() => {
     const set = new Set<string>()
     fees.forEach(f => set.add(f.month_year))
@@ -208,6 +236,12 @@ export default function FeesPage() {
     return Array.from(set).sort()
   }, [fees])
 
+  const availableFamilies = useMemo(() => {
+    const ids = new Set<string>()
+    fees.forEach(f => f.children?.family_id && ids.add(f.children.family_id))
+    return families.filter(f => ids.has(f.id)).sort((a,b) => a.family_name.localeCompare(b.family_name))
+  }, [fees, families])
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return fees.filter(f => {
@@ -216,10 +250,14 @@ export default function FeesPage() {
       if (filterPlan && planOf(f.month_year) !== filterPlan) return false
       if (filterStatus && f.status !== filterStatus) return false
       if (filterClass && f.children?.class_name !== filterClass) return false
-      if (q && !(f.children?.full_name || '').toLowerCase().includes(q)) return false
+      if (filterFamily && f.children?.family_id !== filterFamily) return false
+      if (q) {
+        const hay = `${f.children?.full_name || ''} ${f.children?.parent_name || ''}`.toLowerCase()
+        if (!hay.includes(q)) return false
+      }
       return true
     })
-  }, [fees, pendingOnly, filterPeriod, filterPlan, filterStatus, filterClass, search])
+  }, [fees, pendingOnly, filterPeriod, filterPlan, filterStatus, filterClass, filterFamily, search])
 
   const summary = useMemo(() => {
     const expected = filtered.reduce((s, f) => s + Number(f.amount), 0)
@@ -236,16 +274,13 @@ export default function FeesPage() {
       const row = map.get(cls) || { expected: 0, collected: 0, outstanding: 0, count: 0 }
       const amt = Number(f.amount)
       const paid = paidByFee.get(f.id) || 0
-      row.expected += amt
-      row.collected += paid
-      row.outstanding += Math.max(amt - paid, 0)
-      row.count += 1
+      row.expected += amt; row.collected += paid
+      row.outstanding += Math.max(amt - paid, 0); row.count += 1
       map.set(cls, row)
     })
     return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]))
   }, [filtered, paidByFee])
 
-  // ---------- FORM ACTIONS ----------
   function resetForm() {
     setForm({ ...emptyForm })
     setEditingId(null)
@@ -262,40 +297,31 @@ export default function FeesPage() {
   function startEdit(f: Fee) {
     const plan = planOf(f.month_year)
     setForm({
-      child_id: f.child_id,
-      plan,
+      child_id: f.child_id, plan,
       month_year: plan === 'monthly' ? f.month_year : currentMonth(),
       year: plan === 'annual' ? f.month_year : currentYear(),
-      amount: String(f.amount),
-      status: f.status,
+      amount: String(f.amount), status: f.status,
       last_payment_date: f.last_payment_date || '',
       notes: f.notes || '',
     })
-    setEditingId(f.id)
-    setShowForm(true)
+    setEditingId(f.id); setShowForm(true)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   function setPlan(plan: PlanType) {
-    setForm({
-      ...form, plan,
-      amount: String(plan === 'monthly' ? MONTHLY_AMOUNT : ANNUAL_AMOUNT),
-    })
+    setForm({ ...form, plan, amount: String(plan === 'monthly' ? MONTHLY_AMOUNT : ANNUAL_AMOUNT) })
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!form.child_id) { showBanner('error', 'Please select a child.'); return }
-
     const period = form.plan === 'monthly' ? form.month_year : form.year
     if (!period) { showBanner('error', 'Please pick a period.'); return }
 
     setSaving(true)
     const payload: Record<string, unknown> = {
-      child_id: form.child_id,
-      month_year: period,
-      amount: Number(form.amount) || 0,
-      notes: form.notes.trim(),
+      child_id: form.child_id, month_year: period,
+      amount: Number(form.amount) || 0, notes: form.notes.trim(),
       updated_at: new Date().toISOString(),
     }
     if (form.plan === 'monthly') {
@@ -315,27 +341,22 @@ export default function FeesPage() {
     setSaving(false)
     if (error) { showBanner('error', error.message); return }
     showBanner('success', editingId ? 'Fee updated.' : 'Fee saved.')
-    resetForm()
-    await loadAll()
+    resetForm(); await loadAll()
   }
 
   async function deleteFee(f: Fee) {
-    if (!confirm(`Delete the fee record for ${f.children?.full_name} (${f.month_year})?\n\nAny payments linked to it will be unlinked.`)) return
+    if (!confirm(`Delete the fee record for ${f.children?.full_name} (${f.month_year})?\n\nLinked payments will be unlinked.`)) return
     const { error } = await supabase.from('fees').delete().eq('id', f.id)
     if (error) { showBanner('error', error.message); return }
     showBanner('success', 'Fee record deleted.')
     await loadAll()
   }
 
-  // ---------- PAYMENT ----------
   function openPayModal(f: Fee) {
     const paid = paidByFee.get(f.id) || 0
     const balance = Math.max(Number(f.amount) - paid, 0)
-    setPayModalFee(f)
-    setPayAmount(String(balance || f.amount))
-    setPayMethod('Cash')
-    setPayDate(todayISO())
-    setPayNote('')
+    setPayModalFee(f); setPayAmount(String(balance || f.amount))
+    setPayMethod('Cash'); setPayDate(todayISO()); setPayNote('')
   }
 
   async function savePayment() {
@@ -344,66 +365,45 @@ export default function FeesPage() {
     if (!amt || amt <= 0) { showBanner('error', 'Enter a valid amount.'); return }
 
     setPaySaving(true)
-
-    // Get next receipt number
-    const { data: receiptData, error: rErr } = await supabase.rpc('next_receipt_no')
-    if (rErr) {
-      // fallback: generate locally
-    }
-    const receipt = (receiptData as unknown as string) || 'L-????'
+    const { data: receiptData } = await supabase.rpc('next_receipt_no')
+    const receipt = (receiptData as unknown as string) || `L-${Date.now().toString().slice(-4)}`
 
     const { error } = await supabase.from('fee_payments').insert({
-      fee_id: payModalFee.id,
-      fee_plan_id: payModalFee.fee_plan_id,
-      child_id: payModalFee.child_id,
-      paid_on: payDate,
-      amount: amt,
-      method: payMethod,
-      receipt_no: receipt,
-      for_month: payModalFee.month_year,
-      note: payNote.trim(),
+      fee_id: payModalFee.id, fee_plan_id: payModalFee.fee_plan_id,
+      child_id: payModalFee.child_id, paid_on: payDate,
+      amount: amt, method: payMethod, receipt_no: receipt,
+      for_month: payModalFee.month_year, note: payNote.trim(),
       recorded_by: userName,
     })
     setPaySaving(false)
     if (error) { showBanner('error', error.message); return }
-
     showBanner('success', `Payment recorded (${receipt}).`)
-    setPayModalFee(null)
-    await loadAll()
+    setPayModalFee(null); await loadAll()
   }
 
   async function deletePayment(p: Payment) {
     if (!confirm(`Delete payment ${p.receipt_no || ''} of Rs ${p.amount}?`)) return
     const { error } = await supabase.from('fee_payments').delete().eq('id', p.id)
     if (error) { showBanner('error', error.message); return }
-    showBanner('success', 'Payment deleted.')
-    await loadAll()
+    showBanner('success', 'Payment deleted.'); await loadAll()
   }
 
-  // ---------- BULK GENERATE ----------
   async function runBulkGenerate() {
     const period = bulkPlan === 'monthly' ? bulkMonth : bulkYear
     if (!period) { showBanner('error', 'Pick a period.'); return }
-
     const targets = children.filter(c => !bulkClass || c.class_name === bulkClass)
     if (!targets.length) { showBanner('error', 'No active children match.'); return }
 
     const existing = new Set(fees.filter(f => f.month_year === period).map(f => f.child_id))
     const toCreate = targets.filter(c => !existing.has(c.id))
-    if (!toCreate.length) {
-      showBanner('success', `All matching children already have a ${period} record.`)
-      return
-    }
-
-    if (!confirm(`Create Pending ${bulkPlan} fee records for ${toCreate.length} children for ${period} at Rs ${bulkAmount} each?`)) return
+    if (!toCreate.length) { showBanner('success', `All already have a ${period} record.`); return }
+    if (!confirm(`Create Pending records for ${toCreate.length} children for ${period} at Rs ${bulkAmount}?`)) return
 
     setBulkBusy(true)
     const rows = toCreate.map(c => ({
-      child_id: c.id,
-      month_year: period,
+      child_id: c.id, month_year: period,
       amount: Number(bulkAmount) || (bulkPlan === 'monthly' ? MONTHLY_AMOUNT : ANNUAL_AMOUNT),
-      status: 'Pending' as const,
-      notes: '',
+      status: 'Pending' as const, notes: '',
       due_date: bulkPlan === 'monthly'
         ? `${period.slice(0,4)}-${period.slice(5,7)}-10`
         : `${period}-04-10`,
@@ -411,14 +411,12 @@ export default function FeesPage() {
     const { error } = await supabase.from('fees').insert(rows)
     setBulkBusy(false)
     if (error) { showBanner('error', error.message); return }
-    showBanner('success', `Created ${rows.length} records for ${period}.`)
-    setShowBulk(false)
-    await loadAll()
+    showBanner('success', `Created ${rows.length} records.`)
+    setShowBulk(false); await loadAll()
   }
 
-  // ---------- CSV ----------
   function exportCSV() {
-    const header = ['Child','Class','Parent','Phone','Plan','Period','Target','Paid','Balance','Status','Receipts']
+    const header = ['Child','Class','Family','Parent','Phone','Plan','Period','Target','Paid','Balance','Status','Receipts','Child Total Balance']
     const esc = (v: unknown) => {
       const s = v == null ? '' : String(v)
       return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s
@@ -428,19 +426,40 @@ export default function FeesPage() {
       const paid = paidByFee.get(f.id) || 0
       const bal = Math.max(Number(f.amount) - paid, 0)
       const rcs = (paymentsByFee.get(f.id) || []).map(p => p.receipt_no).filter(Boolean).join(' | ')
+      const cTot = childTotals.get(f.child_id)?.balance ?? 0
+      const fam = f.children?.family_id ? familyById.get(f.children.family_id)?.family_name || '' : ''
       lines.push([
-        f.children?.full_name, f.children?.class_name, f.children?.parent_name, f.children?.parent_phone,
-        planOf(f.month_year), f.month_year, f.amount, paid, bal, f.status, rcs,
+        f.children?.full_name, f.children?.class_name, fam, f.children?.parent_name, f.children?.parent_phone,
+        planOf(f.month_year), f.month_year, f.amount, paid, bal, f.status, rcs, cTot,
       ].map(esc).join(','))
     })
     const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    a.href = url
-    a.download = `fees_${new Date().toISOString().slice(0,10)}.csv`
-    a.click()
+    a.href = url; a.download = `fees_${todayISO()}.csv`; a.click()
     URL.revokeObjectURL(url)
   }
+
+  // Ledger for a child
+  const ledgerChild = useMemo(
+    () => children.find(c => c.id === ledgerChildId) || null,
+    [children, ledgerChildId]
+  )
+  const ledgerFees = useMemo(() => {
+    if (!ledgerChildId) return []
+    return fees
+      .filter(f => f.child_id === ledgerChildId)
+      .sort((a, b) => a.month_year.localeCompare(b.month_year))
+  }, [fees, ledgerChildId])
+  const ledgerTotals = useMemo(() => {
+    const expected = ledgerFees.reduce((s, f) => s + Number(f.amount), 0)
+    const paid = ledgerFees.reduce((s, f) => s + (paidByFee.get(f.id) || 0), 0)
+    return { expected, paid, balance: Math.max(expected - paid, 0) }
+  }, [ledgerFees, paidByFee])
+  const ledgerSiblings = useMemo(() => {
+    if (!ledgerChild?.family_id) return []
+    return children.filter(c => c.family_id === ledgerChild.family_id && c.id !== ledgerChild.id)
+  }, [children, ledgerChild])
 
   if (loading) {
     return <AppShell userName={userName}><div style={{ padding: 40, textAlign: 'center', color: '#718096' }}>Loading fees…</div></AppShell>
@@ -597,11 +616,7 @@ export default function FeesPage() {
             <table>
               <thead>
                 <tr>
-                  <th>Class</th>
-                  <th>Records</th>
-                  <th>Expected</th>
-                  <th>Collected</th>
-                  <th>Outstanding</th>
+                  <th>Class</th><th>Records</th><th>Expected</th><th>Collected</th><th>Outstanding</th>
                 </tr>
               </thead>
               <tbody>
@@ -653,8 +668,15 @@ export default function FeesPage() {
               {availableClasses.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </div>
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 160 }}>
+            <label>Family</label>
+            <select value={filterFamily} onChange={e => setFilterFamily(e.target.value)}>
+              <option value="">All families</option>
+              {availableFamilies.map(f => <option key={f.id} value={f.id}>{f.family_name}</option>)}
+            </select>
+          </div>
           <div className="form-group" style={{ marginBottom: 0, minWidth: 160, flex: 1 }}>
-            <label>Search child</label>
+            <label>Search child or parent</label>
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Name…" />
           </div>
           <button className="btn btn-secondary" onClick={exportCSV}>⬇ CSV</button>
@@ -681,11 +703,13 @@ export default function FeesPage() {
                 <tr>
                   <th>Child</th>
                   <th>Class</th>
+                  <th>Family</th>
                   <th>Plan</th>
                   <th>Period</th>
                   <th>Target</th>
                   <th>Paid</th>
                   <th>Balance</th>
+                  <th>Child Year Balance</th>
                   <th>Status</th>
                   <th style={{ width: 230 }}>Actions</th>
                 </tr>
@@ -696,101 +720,67 @@ export default function FeesPage() {
                   const paid = paidByFee.get(f.id) || 0
                   const balance = Math.max(Number(f.amount) - paid, 0)
                   const overdue = isOverdue(f)
-                  const isExpanded = expandedFeeId === f.id
-                  const payList = paymentsByFee.get(f.id) || []
+                  const childBal = childTotals.get(f.child_id)?.balance ?? 0
+                  const fam = f.children?.family_id ? familyById.get(f.children.family_id) : null
 
                   return (
-                    <>
-                      <tr key={f.id} style={{ background: overdue ? '#fff5f5' : undefined }}>
-                        <td><strong>{f.children?.full_name}</strong></td>
-                        <td>{f.children?.class_name}</td>
-                        <td>
-                          <span className={`badge ${plan === 'annual' ? 'badge-blue' : 'badge-gray'}`}>
-                            {plan === 'annual' ? 'Annual' : 'Monthly'}
-                          </span>
-                        </td>
-                        <td>{f.month_year}</td>
-                        <td>Rs {Number(f.amount).toLocaleString('en-IN')}</td>
-                        <td style={{ color: paid > 0 ? '#2f855a' : undefined }}>
-                          Rs {paid.toLocaleString('en-IN')}
-                        </td>
-                        <td style={{ color: balance > 0 ? '#c53030' : '#2f855a' }}>
-                          Rs {balance.toLocaleString('en-IN')}
-                        </td>
-                        <td>
-                          <span className={`badge ${f.status === 'Paid' ? 'badge-green' : f.status === 'Partial' ? 'badge-yellow' : 'badge-red'}`}>
-                            {f.status}
-                          </span>
-                          {overdue && <span className="badge badge-red" style={{ marginLeft: 6 }}>⚠️ Overdue</span>}
-                        </td>
-                        <td>
-                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                            {canEdit && (
-                              <button className="btn btn-sm btn-success" onClick={() => openPayModal(f)} title="Record Payment">
-                                💵 Pay
-                              </button>
-                            )}
-                            <button className="btn btn-sm btn-secondary" onClick={() => setExpandedFeeId(isExpanded ? null : f.id)} title="Ledger">
-                              👁 {isExpanded ? 'Hide' : `Ledger${payList.length ? ` (${payList.length})` : ''}`}
+                    <tr key={f.id} style={{ background: overdue ? '#fff5f5' : undefined }}>
+                      <td><strong>{f.children?.full_name}</strong></td>
+                      <td>{f.children?.class_name}</td>
+                      <td>
+                        {fam ? (
+                          <button
+                            className="btn btn-sm btn-secondary"
+                            onClick={() => setLedgerChildId(f.child_id)}
+                            title="Open child ledger"
+                          >
+                            {fam.family_name}
+                          </button>
+                        ) : '—'}
+                      </td>
+                      <td>
+                        <span className={`badge ${plan === 'annual' ? 'badge-blue' : 'badge-gray'}`}>
+                          {plan === 'annual' ? 'Annual' : 'Monthly'}
+                        </span>
+                      </td>
+                      <td>{f.month_year}</td>
+                      <td>Rs {Number(f.amount).toLocaleString('en-IN')}</td>
+                      <td style={{ color: paid > 0 ? '#2f855a' : undefined }}>
+                        Rs {paid.toLocaleString('en-IN')}
+                      </td>
+                      <td style={{ color: balance > 0 ? '#c53030' : '#2f855a' }}>
+                        Rs {balance.toLocaleString('en-IN')}
+                      </td>
+                      <td style={{ color: childBal > 0 ? '#c53030' : '#2f855a', fontWeight: 600 }}>
+                        Rs {childBal.toLocaleString('en-IN')}
+                      </td>
+                      <td>
+                        <span className={`badge ${f.status === 'Paid' ? 'badge-green' : f.status === 'Partial' ? 'badge-yellow' : 'badge-red'}`}>
+                          {f.status}
+                        </span>
+                        {overdue && <span className="badge badge-red" style={{ marginLeft: 6 }}>⚠️</span>}
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {canEdit && (
+                            <button className="btn btn-sm btn-success" onClick={() => openPayModal(f)} title="Record Payment">
+                              💵 Pay
                             </button>
-                            {canEdit && (
-                              <button className="btn btn-sm btn-secondary" onClick={() => startEdit(f)}>✏️</button>
-                            )}
-                            {canEdit && (
-                              <button className="btn btn-sm btn-secondary"
-                                style={{ color: '#c53030', borderColor: '#fc8181' }}
-                                onClick={() => deleteFee(f)}>🗑</button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-
-                      {isExpanded && (
-                        <tr key={`${f.id}-ledger`}>
-                          <td colSpan={9} style={{ background: '#f7fafc', padding: 16 }}>
-                            <div style={{ marginBottom: 8, fontWeight: 600 }}>
-                              Payment history — {f.children?.full_name} · {f.month_year}
-                            </div>
-                            {payList.length === 0 ? (
-                              <p style={{ color: '#718096', margin: 0 }}>No payments recorded yet.</p>
-                            ) : (
-                              <table style={{ background: 'white' }}>
-                                <thead>
-                                  <tr>
-                                    <th>Date</th>
-                                    <th>Receipt</th>
-                                    <th>Amount</th>
-                                    <th>Method</th>
-                                    <th>Note</th>
-                                    <th>By</th>
-                                    <th></th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {payList.map(p => (
-                                    <tr key={p.id}>
-                                      <td>{p.paid_on}</td>
-                                      <td><strong>{p.receipt_no || '—'}</strong></td>
-                                      <td>Rs {Number(p.amount).toLocaleString('en-IN')}</td>
-                                      <td>{p.method}</td>
-                                      <td>{p.note || '—'}</td>
-                                      <td>{p.recorded_by || '—'}</td>
-                                      <td>
-                                        {canEdit && (
-                                          <button className="btn btn-sm btn-secondary"
-                                            style={{ color: '#c53030', borderColor: '#fc8181' }}
-                                            onClick={() => deletePayment(p)}>🗑</button>
-                                        )}
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            )}
-                          </td>
-                        </tr>
-                      )}
-                    </>
+                          )}
+                          <button className="btn btn-sm btn-secondary" onClick={() => setLedgerChildId(f.child_id)} title="Child ledger">
+                            👁
+                          </button>
+                          {canEdit && (
+                            <button className="btn btn-sm btn-secondary" onClick={() => startEdit(f)}>✏️</button>
+                          )}
+                          {canEdit && (
+                            <button className="btn btn-sm btn-secondary"
+                              style={{ color: '#c53030', borderColor: '#fc8181' }}
+                              onClick={() => deleteFee(f)}>🗑</button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
                   )
                 })}
               </tbody>
@@ -799,6 +789,134 @@ export default function FeesPage() {
         )}
       </div>
 
+      {/* CHILD LEDGER DRAWER */}
+      {ledgerChild && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+          display: 'flex', justifyContent: 'flex-end', zIndex: 1000,
+        }} onClick={() => setLedgerChildId(null)}>
+          <div
+            style={{ width: '100%', maxWidth: 720, background: 'white', height: '100%', overflowY: 'auto', padding: 24 }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+              <div>
+                <h3 style={{ margin: 0 }}>{ledgerChild.full_name}</h3>
+                <div style={{ fontSize: '0.9rem', color: '#4a5568' }}>
+                  {ledgerChild.class_name} · {ledgerChild.parent_name || '—'} · {ledgerChild.parent_phone || '—'}
+                </div>
+                {ledgerChild.family_id && familyById.get(ledgerChild.family_id) && (
+                  <div style={{ fontSize: '0.85rem', color: '#2b6cb0', marginTop: 4 }}>
+                    Family: {familyById.get(ledgerChild.family_id)?.family_name}
+                  </div>
+                )}
+              </div>
+              <button className="btn btn-secondary" onClick={() => setLedgerChildId(null)}>Close</button>
+            </div>
+
+            <div className="grid" style={{ marginBottom: 16 }}>
+              <div className="stat info">
+                <div className="label">Expected</div>
+                <div className="value">Rs {ledgerTotals.expected.toLocaleString('en-IN')}</div>
+              </div>
+              <div className="stat">
+                <div className="label">Paid</div>
+                <div className="value" style={{ color: '#2f855a' }}>Rs {ledgerTotals.paid.toLocaleString('en-IN')}</div>
+              </div>
+              <div className="stat warning">
+                <div className="label">Balance</div>
+                <div className="value">Rs {ledgerTotals.balance.toLocaleString('en-IN')}</div>
+              </div>
+            </div>
+
+            <h4 style={{ marginTop: 20 }}>Fee Schedule</h4>
+            <table>
+              <thead>
+                <tr>
+                  <th>Period</th>
+                  <th>Target</th>
+                  <th>Paid</th>
+                  <th>Balance</th>
+                  <th>Status</th>
+                  <th>Payments</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ledgerFees.map(f => {
+                  const paid = paidByFee.get(f.id) || 0
+                  const bal = Math.max(Number(f.amount) - paid, 0)
+                  const pays = paymentsByFee.get(f.id) || []
+                  return (
+                    <tr key={f.id}>
+                      <td><strong>{f.month_year}</strong></td>
+                      <td>Rs {Number(f.amount).toLocaleString('en-IN')}</td>
+                      <td style={{ color: '#2f855a' }}>Rs {paid.toLocaleString('en-IN')}</td>
+                      <td style={{ color: bal > 0 ? '#c53030' : '#2f855a' }}>Rs {bal.toLocaleString('en-IN')}</td>
+                      <td>
+                        <span className={`badge ${f.status === 'Paid' ? 'badge-green' : f.status === 'Partial' ? 'badge-yellow' : 'badge-red'}`}>
+                          {f.status}
+                        </span>
+                      </td>
+                      <td>
+                        {pays.length === 0 ? <span style={{ color: '#a0aec0' }}>—</span> : (
+                          <div style={{ fontSize: '0.8rem' }}>
+                            {pays.map(p => (
+                              <div key={p.id}>
+                                {p.paid_on} · Rs {Number(p.amount).toLocaleString('en-IN')} · {p.receipt_no || '—'}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+
+            {ledgerSiblings.length > 0 && (
+              <>
+                <h4 style={{ marginTop: 24 }}>Siblings in this family</h4>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Class</th>
+                      <th>Year Balance</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ledgerSiblings.map(s => {
+                      const sBal = childTotals.get(s.id)?.balance ?? 0
+                      return (
+                        <tr key={s.id}>
+                          <td><strong>{s.full_name}</strong></td>
+                          <td>{s.class_name}</td>
+                          <td style={{ color: sBal > 0 ? '#c53030' : '#2f855a', fontWeight: 600 }}>
+                            Rs {sBal.toLocaleString('en-IN')}
+                          </td>
+                          <td>
+                            <button className="btn btn-sm btn-secondary" onClick={() => setLedgerChildId(s.id)}>
+                              👁 View
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+                <div style={{ marginTop: 12, padding: 12, background: '#ebf8ff', borderRadius: 6, fontSize: '0.9rem' }}>
+                  <strong>Family total balance:</strong>{' '}
+                  Rs {(ledgerTotals.balance + ledgerSiblings.reduce((s, k) => s + (childTotals.get(k.id)?.balance ?? 0), 0)).toLocaleString('en-IN')}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* PAYMENT MODAL */}
       {payModalFee && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
