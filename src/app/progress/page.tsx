@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import AppShell from '@/components/AppShell'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+
 
 type Child = { id: string; full_name: string; class_name: string }
 
@@ -141,7 +143,11 @@ export default function ProgressPage() {
               {notes.map(n => (
                 <tr key={n.id}>
                   <td>{n.note_date}</td>
-                  <td><strong>{n.children?.full_name}</strong></td>
+                  <td>
+  <Link href={`/students/${n.child_id}`} style={{ color: '#2b6cb0', textDecoration: 'none', fontWeight: 600 }}>
+    {n.children?.full_name}
+  </Link>
+</td>
                   <td>{n.children?.class_name}</td>
                   <td><span className="badge badge-blue">{n.category}</span></td>
                   <td>{n.note}</td>

@@ -1,4 +1,4 @@
-# Lilliput Play School – Data Management System
+# Lilliput Play School – Data Management System (Bhavesh Sangwan)
 
 Custom internal application for managing attendance follow-up, fees, parent communication and child records.
 

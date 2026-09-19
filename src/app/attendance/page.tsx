@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import AppShell from '@/components/AppShell'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 
 type Child = { id: string; full_name: string; class_name: string }
 type Attendance = {
@@ -204,7 +205,11 @@ export default function AttendancePage() {
             <tbody>
               {records.map(r => (
                 <tr key={r.id}>
-                  <td><strong>{r.children?.full_name}</strong></td>
+                  <td>
+  <Link href={`/students/${r.child_id}`} style={{ color: '#2b6cb0', textDecoration: 'none', fontWeight: 600 }}>
+    {r.children?.full_name}
+  </Link>
+</td>
                   <td>{r.children?.class_name}</td>
                   <td>
                     <span className={`badge ${r.status === 'Present' ? 'badge-green' : r.status === 'Late' ? 'badge-yellow' : 'badge-red'}`}>
