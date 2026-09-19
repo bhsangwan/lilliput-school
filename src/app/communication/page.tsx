@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import AppShell from '@/components/AppShell'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 
 type Child = { id: string; full_name: string; class_name: string }
 
@@ -147,7 +148,11 @@ export default function CommunicationPage() {
               {logs.map(c => (
                 <tr key={c.id}>
                   <td>{c.log_date}</td>
-                  <td><strong>{c.children?.full_name}</strong></td>
+                  <td>
+  <Link href={`/students/${c.child_id}`} style={{ color: '#2b6cb0', textDecoration: 'none', fontWeight: 600 }}>
+    {c.children?.full_name}
+  </Link>
+</td>
                   <td>{c.message_summary}</td>
                   <td>{c.channel}</td>
                   <td>{c.action_required || '—'}</td>
