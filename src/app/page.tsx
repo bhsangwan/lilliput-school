@@ -3,14 +3,8 @@ import { redirect } from 'next/navigation'
 import AppShell from '@/components/AppShell'
 import Link from 'next/link'
 
-const todayISO = () => new Date().toISOString().slice(0, 10)
-
 function formatRs(n: number) {
   return 'Rs ' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })
-}
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
 export default async function DashboardPage() {
@@ -24,20 +18,17 @@ export default async function DashboardPage() {
     .eq('id', user.id)
     .single()
 
-  // Load everything we need
   const [
     { data: accounts },
     { data: families },
     { data: children },
-    { data: installments },
   ] = await Promise.all([
     supabase.from('family_fee_accounts').select('*'),
     supabase.from('families').select('id, family_name, primary_parent_name, primary_parent_phone'),
     supabase.from('children').select('id, family_id, full_name, class_name, is_active'),
-    supabase.from('family_fee_installments').select('*').order('due_date'),
   ])
 
-  const familiesById = new Map((families || []).map((f: any) => [f.id, f]))
+  const familiesById = new Map<string, any>((families || []).map((f: any) => [f.id, f]))
   const childrenByFamily = new Map<string, any[]>()
   ;(children || []).forEach((c: any) => {
     if (!c.family_id || !c.is_active) return
@@ -46,51 +37,35 @@ export default async function DashboardPage() {
     childrenByFamily.set(c.family_id, arr)
   })
 
-  const installmentsByAccount = new Map<string, any[]>()
-  ;(installments || []).forEach((i: any) => {
-    const arr = installmentsByAccount.get(i.family_fee_account_id) || []
-    arr.push(i)
-    installmentsByAccount.set(i.family_fee_account_id, arr)
-  })
-
-  // Compute summary
-  let outstandingTotal = 0
+  // Summary
+  let totalOutstanding = 0
+  let totalOverdue = 0
   let overdueCount = 0
-  let annualFollowUpCount = 0
+  let annualPendingCount = 0
   let activeStudentCount = 0
 
   ;(accounts || []).forEach((acc: any) => {
-    outstandingTotal += Number(acc.balance) || 0
-    if (Number(acc.balance) <= 0) return
-
-    if (acc.plan_type === 'annual') {
-      annualFollowUpCount += 1
-    } else {
-      // monthly: overdue if any non-Paid installment past due
-      const insts = installmentsByAccount.get(acc.id) || []
-      const hasOverdue = insts.some(
-        (i: any) => i.status !== 'Paid' && i.status !== 'Pending' && i.due_date < todayISO()
-      ) || insts.some(
-        (i: any) => i.status === 'Overdue'
-      )
-      if (hasOverdue) overdueCount += 1
-    }
+    const bal = Number(acc.balance) || 0
+    const od = Number(acc.overdue_amount) || 0
+    totalOutstanding += bal
+    totalOverdue += od
+    if (od > 0) overdueCount += 1
+    if (bal > 0 && acc.plan_type === 'annual') annualPendingCount += 1
   })
 
   ;(children || []).forEach((c: any) => {
     if (c.is_active) activeStudentCount += 1
   })
 
-  // Needs Attention: top 5 families with most urgent dues
+  // Needs Attention
   type AttentionRow = {
     familyId: string
     familyName: string
     parentName: string
     children: string
     balance: number
+    overdue: number
     planType: 'monthly' | 'annual'
-    isOverdue: boolean
-    oldestDueDate: string | null
   }
 
   const attention: AttentionRow[] = []
@@ -99,19 +74,7 @@ export default async function DashboardPage() {
     const fam = familiesById.get(acc.family_id)
     if (!fam) return
     const kids = childrenByFamily.get(fam.id) || []
-    const kidNames = kids.map((k: any) => k.full_name).join(', ')
-
-    let isOverdue = false
-    let oldestDueDate: string | null = null
-
-    if (acc.plan_type === 'monthly') {
-      const insts = (installmentsByAccount.get(acc.id) || [])
-        .filter((i: any) => i.status !== 'Paid' && Number(i.amount_due) > 0)
-        .sort((a: any, b: any) => a.due_date.localeCompare(b.due_date))
-      const overdueInsts = insts.filter((i: any) => i.due_date < todayISO())
-      isOverdue = overdueInsts.length > 0
-      oldestDueDate = insts[0]?.due_date || null
-    }
+    const kidNames = kids.map((k: any) => `${k.full_name} (${k.class_name})`).join(', ')
 
     attention.push({
       familyId: fam.id,
@@ -119,17 +82,17 @@ export default async function DashboardPage() {
       parentName: fam.primary_parent_name || '—',
       children: kidNames,
       balance: Number(acc.balance),
+      overdue: Number(acc.overdue_amount) || 0,
       planType: acc.plan_type,
-      isOverdue,
-      oldestDueDate,
     })
   })
 
   attention.sort((a, b) => {
-    if (a.isOverdue !== b.isOverdue) return a.isOverdue ? -1 : 1
+    // Overdue first (biggest overdue at top), then by balance desc
+    if (a.overdue !== b.overdue) return b.overdue - a.overdue
     return b.balance - a.balance
   })
-  const topAttention = attention.slice(0, 5)
+  const topAttention = attention.slice(0, 6)
 
   return (
     <AppShell userName={profile?.full_name}>
@@ -147,17 +110,17 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid">
-        <div className="stat warning">
-          <div className="label">Outstanding Fees</div>
-          <div className="value">{formatRs(outstandingTotal)}</div>
-        </div>
         <div className="stat danger">
-          <div className="label">Overdue Families</div>
-          <div className="value">{overdueCount}</div>
+          <div className="label">Overdue Amount</div>
+          <div className="value">{formatRs(totalOverdue)}</div>
+        </div>
+        <div className="stat warning">
+          <div className="label">Outstanding Total</div>
+          <div className="value">{formatRs(totalOutstanding)}</div>
         </div>
         <div className="stat info">
-          <div className="label">Annual Follow-ups</div>
-          <div className="value">{annualFollowUpCount}</div>
+          <div className="label">Overdue Families</div>
+          <div className="value">{overdueCount}</div>
         </div>
         <div className="stat">
           <div className="label">Active Students</div>
@@ -177,6 +140,7 @@ export default async function DashboardPage() {
                   <th>Family</th>
                   <th>Children</th>
                   <th>Plan</th>
+                  <th>Overdue</th>
                   <th>Balance</th>
                   <th>Status</th>
                   <th></th>
@@ -184,7 +148,7 @@ export default async function DashboardPage() {
               </thead>
               <tbody>
                 {topAttention.map(a => (
-                  <tr key={a.familyId}>
+                  <tr key={a.familyId} style={{ background: a.overdue > 0 ? '#fff5f5' : undefined }}>
                     <td>
                       <div><strong>{a.familyName}</strong></div>
                       <div style={{ fontSize: '0.8rem', color: '#718096' }}>{a.parentName}</div>
@@ -195,12 +159,15 @@ export default async function DashboardPage() {
                         ? <span className="badge badge-blue">Annual</span>
                         : <span className="badge badge-gray">Monthly</span>}
                     </td>
-                    <td style={{ fontWeight: 600, color: '#c53030' }}>{formatRs(a.balance)}</td>
+                    <td style={{ fontWeight: 600, color: a.overdue > 0 ? '#c53030' : '#a0aec0' }}>
+                      {a.overdue > 0 ? formatRs(a.overdue) : '—'}
+                    </td>
+                    <td style={{ fontWeight: 600 }}>{formatRs(a.balance)}</td>
                     <td>
-                      {a.isOverdue
+                      {a.overdue > 0
                         ? <span className="badge badge-red">⚠️ Overdue</span>
                         : a.planType === 'annual'
-                          ? <span className="badge badge-blue">📌 Follow-up</span>
+                          ? <span className="badge badge-blue">Pending (Annual)</span>
                           : <span className="badge badge-yellow">Pending</span>}
                     </td>
                     <td>
@@ -217,7 +184,7 @@ export default async function DashboardPage() {
       <div className="card">
         <div className="card-title">💰 Fee Reminders</div>
         <p style={{ color: '#4a5568', fontSize: '0.9rem', marginTop: 0 }}>
-          See which families have installments due or overdue, and send reminders in one click.
+          See which families have overdue or upcoming dues, and send reminders in one click.
         </p>
         <Link href="/reminders" className="btn btn-primary">Open Reminders →</Link>
       </div>
