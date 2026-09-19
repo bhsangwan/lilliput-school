@@ -40,7 +40,6 @@ function currentYearMonth() {
 function monthsRemainingFrom(admissionMonth: string): number {
   if (!/^\d{4}-\d{2}$/.test(admissionMonth)) return 12
   const [y, m] = admissionMonth.split('-').map(Number)
-  // Academic year end: March of (adm year) if m <= 3, else March of (adm year + 1)
   const endYear = m <= 3 ? y : y + 1
   const mr = (endYear - y) * 12 + (3 - m) + 1
   return mr > 0 ? mr : 1
@@ -76,8 +75,6 @@ export default function NewAdmissionPage() {
   const [paymentNote, setPaymentNote] = useState('')
 
   const monthsRemaining = useMemo(() => monthsRemainingFrom(admissionMonth), [admissionMonth])
-
-  const canEdit = true // any logged-in user can create admissions; adjust per role later
 
   useEffect(() => {
     async function init() {
@@ -136,7 +133,7 @@ export default function NewAdmissionPage() {
         full_name: '',
         class_name: '',
         monthly_fee: String(DEFAULT_MONTHLY),
-        discount_percent: prev.length >= 1 ? '25' : '0', // default 25% for 2nd+ children
+        discount_percent: prev.length >= 1 ? '25' : '0',
         final_fee_override: '',
       }
     ])
@@ -169,7 +166,6 @@ export default function NewAdmissionPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
 
-    // Validation
     if (!parentName.trim()) { showBanner('error', 'Parent name is required.'); return }
     if (!parentPhone.trim()) { showBanner('error', 'Parent phone is required.'); return }
     if (!/^\d{4}-\d{2}$/.test(admissionMonth)) { showBanner('error', 'Pick a valid admission month.'); return }
@@ -205,11 +201,11 @@ export default function NewAdmissionPage() {
         familyId = fam.id
       }
 
-      // 2. Admission date (5th of admission month, or today)
+      // 2. Admission date
       const [y, m] = admissionMonth.split('-').map(Number)
       const admissionDate = `${y}-${String(m).padStart(2, '0')}-05`
 
-      // 3. Create family_fee_accounts placeholder
+      // 3. Create family_fee_accounts
       const { data: account, error: accErr } = await supabase
         .from('family_fee_accounts')
         .insert({
@@ -291,7 +287,7 @@ export default function NewAdmissionPage() {
         if (payErr) throw payErr
       }
 
-      // Trigger will recompute account; but call it explicitly to be safe
+      // Trigger will recompute; call explicitly to be safe
       await supabase.rpc('recompute_family_account', { p_account_id: account.id })
 
       showBanner('success', 'Admission created successfully! Redirecting…')
