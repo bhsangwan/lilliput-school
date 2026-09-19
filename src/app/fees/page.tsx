@@ -4,16 +4,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import AppShell from '@/components/AppShell'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 
-type Child = {
-  id: string
-  full_name: string
-  class_name: string
-  parent_name: string | null
-  parent_phone: string | null
-  family_id: string | null
-}
-
+// ---------- TYPES ----------
 type Family = {
   id: string
   family_name: string
@@ -21,70 +14,80 @@ type Family = {
   primary_parent_phone: string | null
 }
 
-type Fee = {
+type Child = {
   id: string
-  child_id: string
-  fee_plan_id: string | null
-  month_year: string
-  amount: number
-  status: 'Paid' | 'Pending' | 'Partial'
-  last_payment_date: string | null
-  due_date: string | null
+  family_id: string | null
+  full_name: string
+  class_name: string
+  is_active: boolean
+}
+
+type Account = {
+  id: string
+  family_id: string
+  academic_year: number
+  admission_date: string
+  total_fee: number
+  paid_amount: number
+  balance: number
+  monthly_installment: number
   notes: string | null
-  children?: { full_name: string; class_name: string; parent_name: string | null; parent_phone: string | null; family_id: string | null }
 }
 
 type Payment = {
   id: string
-  fee_id: string | null
-  child_id: string
+  family_fee_account_id: string
+  family_id: string
   paid_on: string
   amount: number
   method: string
   receipt_no: string | null
-  for_month: string | null
   note: string | null
   recorded_by: string | null
 }
 
-const CLASS_OPTIONS = [
-  'Nursery A','Nursery B',
-  'LKG A','LKG B',
-  'UKG A','UKG B',
-  'Class_1 A','Class_1 B',
-  'Class_2 A','Class_2 B',
-  'Class_3 A','Class_3 B',
-]
+type Installment = {
+  id: string
+  family_fee_account_id: string
+  month_year: string
+  amount_due: number
+  due_date: string
+  status: 'Pending' | 'Paid' | 'Partial' | 'Overdue'
+}
 
-const MONTHLY_AMOUNT = 3500
-const ANNUAL_AMOUNT = 42000
-
-const currentMonth = () => new Date().toISOString().slice(0, 7)
-const currentYear = () => new Date().toISOString().slice(0, 4)
-const todayISO = () => new Date().toISOString().slice(0, 10)
-
-type PlanType = 'monthly' | 'annual'
-const emptyForm = {
-  child_id: '',
-  plan: 'monthly' as PlanType,
-  month_year: currentMonth(),
-  year: currentYear(),
-  amount: String(MONTHLY_AMOUNT),
-  status: 'Pending' as 'Paid' | 'Pending' | 'Partial',
-  last_payment_date: '',
-  notes: '',
+type FamilyRow = {
+  family: Family
+  account: Account
+  children: Child[]
+  classes: string
+  nextDue: Installment | null
+  displayStatus: 'Paid' | 'Pending' | 'Overdue'
+  oldestOverdueDate: string | null
 }
 
 type Banner = { type: 'success' | 'error'; message: string } | null
 
-function planOf(period: string): PlanType {
-  return /^\d{4}$/.test(period) ? 'annual' : 'monthly'
+// ---------- HELPERS ----------
+const todayISO = () => new Date().toISOString().slice(0, 10)
+
+function formatRs(n: number) {
+  return 'Rs ' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })
 }
 
-function isOverdue(f: Fee) {
-  if (!f.due_date) return false
-  if (f.status === 'Paid') return false
-  return f.due_date < todayISO()
+function formatRsPrecise(n: number) {
+  return 'Rs ' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })
+}
+
+function formatDate(iso: string | null) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
+function monthLabel(ym: string) {
+  if (!ym) return ''
+  const [y, m] = ym.split('-').map(Number)
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  return `${months[m-1]} ${y}`
 }
 
 export default function FeesPage() {
@@ -93,69 +96,51 @@ export default function FeesPage() {
 
   const [userName, setUserName] = useState('')
   const [role, setRole] = useState('')
-  const [children, setChildren] = useState<Child[]>([])
-  const [families, setFamilies] = useState<Family[]>([])
-  const [fees, setFees] = useState<Fee[]>([])
-  const [payments, setPayments] = useState<Payment[]>([])
   const [loading, setLoading] = useState(true)
-
-  const [showForm, setShowForm] = useState(false)
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [form, setForm] = useState({ ...emptyForm })
   const [banner, setBanner] = useState<Banner>(null)
-  const [saving, setSaving] = useState(false)
 
-  const [showBulk, setShowBulk] = useState(false)
-  const [bulkPlan, setBulkPlan] = useState<PlanType>('monthly')
-  const [bulkMonth, setBulkMonth] = useState(currentMonth())
-  const [bulkYear, setBulkYear] = useState(currentYear())
-  const [bulkClass, setBulkClass] = useState('')
-  const [bulkAmount, setBulkAmount] = useState(String(MONTHLY_AMOUNT))
-  const [bulkBusy, setBulkBusy] = useState(false)
+  const [families, setFamilies] = useState<Family[]>([])
+  const [children, setChildren] = useState<Child[]>([])
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const [payments, setPayments] = useState<Payment[]>([])
+  const [installments, setInstallments] = useState<Installment[]>([])
 
-  const [filterPeriod, setFilterPeriod] = useState('')
-  const [filterPlan, setFilterPlan] = useState<'' | PlanType>('')
-  const [filterStatus, setFilterStatus] = useState('')
-  const [filterClass, setFilterClass] = useState('')
-  const [filterFamily, setFilterFamily] = useState('')
+  // Filters
   const [search, setSearch] = useState('')
-  const [pendingOnly, setPendingOnly] = useState(false)
+  const [filterClass, setFilterClass] = useState('')
+  const [filterStatus, setFilterStatus] = useState('')
+  const [showPaid, setShowPaid] = useState(false)
   const [showClassSummary, setShowClassSummary] = useState(false)
 
-  const [ledgerChildId, setLedgerChildId] = useState<string | null>(null)
-
-  const [payModalFee, setPayModalFee] = useState<Fee | null>(null)
+  // Record Payment modal
+  const [payModalAccount, setPayModalAccount] = useState<Account | null>(null)
   const [payAmount, setPayAmount] = useState('')
   const [payMethod, setPayMethod] = useState('Cash')
   const [payDate, setPayDate] = useState(todayISO())
   const [payNote, setPayNote] = useState('')
   const [paySaving, setPaySaving] = useState(false)
 
+  // Ledger drawer
+  const [ledgerFamilyId, setLedgerFamilyId] = useState<string | null>(null)
+  const [ledgerShowPayments, setLedgerShowPayments] = useState(false)
+
+  // Edit total fee modal
+  const [editAccount, setEditAccount] = useState<Account | null>(null)
+  const [editTotal, setEditTotal] = useState('')
+  const [editReason, setEditReason] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
+
   const canEdit = role === 'director' || role === 'coordinator' || role === 'office'
 
+  // ---------- LOAD ----------
   useEffect(() => {
     async function init() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { router.push('/login'); return }
-
       const { data: profile } = await supabase
         .from('profiles').select('full_name, role').eq('id', user.id).single()
       setUserName(profile?.full_name || '')
       setRole(profile?.role || '')
-
-      const { data: kids } = await supabase
-        .from('children')
-        .select('id, full_name, class_name, parent_name, parent_phone, family_id')
-        .eq('is_active', true)
-        .order('full_name')
-      setChildren((kids as Child[]) || [])
-
-      const { data: fams } = await supabase
-        .from('families')
-        .select('id, family_name, primary_parent_name, primary_parent_phone')
-        .order('family_name')
-      setFamilies((fams as Family[]) || [])
-
       await loadAll()
       setLoading(false)
     }
@@ -164,17 +149,28 @@ export default function FeesPage() {
   }, [])
 
   async function loadAll() {
-    const { data: feeData, error: feeErr } = await supabase
-      .from('fees')
-      .select('*, children(full_name, class_name, parent_name, parent_phone, family_id)')
-      .order('month_year', { ascending: false })
-    if (feeErr) { showBanner('error', feeErr.message); return }
-    setFees((feeData as Fee[]) || [])
+    const { data: fams, error: e1 } = await supabase.from('families').select('*').order('family_name')
+    if (e1) { showBanner('error', e1.message); return }
+    setFamilies((fams as Family[]) || [])
 
-    const { data: payData, error: payErr } = await supabase
-      .from('fee_payments').select('*').order('paid_on', { ascending: false })
-    if (payErr) { showBanner('error', payErr.message); return }
-    setPayments((payData as Payment[]) || [])
+    const { data: kids, error: e2 } = await supabase
+      .from('children').select('id, family_id, full_name, class_name, is_active')
+    if (e2) { showBanner('error', e2.message); return }
+    setChildren((kids as Child[]) || [])
+
+    const { data: accs, error: e3 } = await supabase.from('family_fee_accounts').select('*')
+    if (e3) { showBanner('error', e3.message); return }
+    setAccounts((accs as Account[]) || [])
+
+    const { data: pays, error: e4 } = await supabase
+      .from('family_fee_payments').select('*').order('paid_on', { ascending: false })
+    if (e4) { showBanner('error', e4.message); return }
+    setPayments((pays as Payment[]) || [])
+
+    const { data: insts, error: e5 } = await supabase
+      .from('family_fee_installments').select('*').order('due_date')
+    if (e5) { showBanner('error', e5.message); return }
+    setInstallments((insts as Installment[]) || [])
   }
 
   function showBanner(type: 'success' | 'error', message: string) {
@@ -182,284 +178,225 @@ export default function FeesPage() {
     setTimeout(() => setBanner(null), 4000)
   }
 
-  const paymentsByFee = useMemo(() => {
-    const m = new Map<string, Payment[]>()
-    payments.forEach(p => {
-      if (!p.fee_id) return
-      const arr = m.get(p.fee_id) || []
-      arr.push(p)
-      m.set(p.fee_id, arr)
+  // ---------- DERIVED: rows ----------
+  const rows: FamilyRow[] = useMemo(() => {
+    const childrenByFamily = new Map<string, Child[]>()
+    children.forEach(c => {
+      if (!c.family_id || !c.is_active) return
+      const arr = childrenByFamily.get(c.family_id) || []
+      arr.push(c)
+      childrenByFamily.set(c.family_id, arr)
     })
-    return m
-  }, [payments])
 
-  const paidByFee = useMemo(() => {
-    const m = new Map<string, number>()
-    payments.forEach(p => {
-      if (!p.fee_id) return
-      m.set(p.fee_id, (m.get(p.fee_id) || 0) + Number(p.amount))
+    const installmentsByAccount = new Map<string, Installment[]>()
+    installments.forEach(i => {
+      const arr = installmentsByAccount.get(i.family_fee_account_id) || []
+      arr.push(i)
+      installmentsByAccount.set(i.family_fee_account_id, arr)
     })
-    return m
-  }, [payments])
 
-  // Child TOTAL balance across all fee rows
-  const childTotals = useMemo(() => {
-    const m = new Map<string, { expected: number; paid: number; balance: number }>()
-    fees.forEach(f => {
-      const row = m.get(f.child_id) || { expected: 0, paid: 0, balance: 0 }
-      const amt = Number(f.amount)
-      const paid = paidByFee.get(f.id) || 0
-      row.expected += amt
-      row.paid += paid
-      row.balance += Math.max(amt - paid, 0)
-      m.set(f.child_id, row)
+    const out: FamilyRow[] = []
+    accounts.forEach(acc => {
+      const fam = families.find(f => f.id === acc.family_id)
+      if (!fam) return
+      const kids = childrenByFamily.get(fam.id) || []
+      const classes = Array.from(new Set(kids.map(k => k.class_name))).sort().join(', ')
+
+      const accInsts = (installmentsByAccount.get(acc.id) || [])
+        .filter(i => i.status !== 'Paid' && Number(i.amount_due) > 0)
+        .sort((a, b) => a.due_date.localeCompare(b.due_date))
+
+      const nextDue = accInsts[0] || null
+
+      const overdueInsts = accInsts.filter(i => i.due_date < todayISO())
+      const oldestOverdueDate = overdueInsts[0]?.due_date || null
+
+      let displayStatus: 'Paid' | 'Pending' | 'Overdue' = 'Pending'
+      if (Number(acc.balance) <= 0) displayStatus = 'Paid'
+      else if (overdueInsts.length > 0) displayStatus = 'Overdue'
+
+      out.push({
+        family: fam,
+        account: acc,
+        children: kids,
+        classes,
+        nextDue,
+        displayStatus,
+        oldestOverdueDate,
+      })
     })
-    return m
-  }, [fees, paidByFee])
+    return out
+  }, [families, children, accounts, installments])
 
-  const familyById = useMemo(() => {
-    const m = new Map<string, Family>()
-    families.forEach(f => m.set(f.id, f))
-    return m
-  }, [families])
-
-  const availablePeriods = useMemo(() => {
-    const set = new Set<string>()
-    fees.forEach(f => set.add(f.month_year))
-    set.add(currentMonth()); set.add(currentYear())
-    return Array.from(set).sort().reverse()
-  }, [fees])
-
+  // ---------- FILTER ----------
   const availableClasses = useMemo(() => {
-    const set = new Set<string>()
-    fees.forEach(f => f.children?.class_name && set.add(f.children.class_name))
-    return Array.from(set).sort()
-  }, [fees])
-
-  const availableFamilies = useMemo(() => {
-    const ids = new Set<string>()
-    fees.forEach(f => f.children?.family_id && ids.add(f.children.family_id))
-    return families.filter(f => ids.has(f.id)).sort((a,b) => a.family_name.localeCompare(b.family_name))
-  }, [fees, families])
+    const s = new Set<string>()
+    children.forEach(c => c.is_active && s.add(c.class_name))
+    return Array.from(s).sort()
+  }, [children])
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    return fees.filter(f => {
-      if (pendingOnly && f.status === 'Paid') return false
-      if (filterPeriod && f.month_year !== filterPeriod) return false
-      if (filterPlan && planOf(f.month_year) !== filterPlan) return false
-      if (filterStatus && f.status !== filterStatus) return false
-      if (filterClass && f.children?.class_name !== filterClass) return false
-      if (filterFamily && f.children?.family_id !== filterFamily) return false
+    let list = rows.filter(r => {
+      if (!showPaid && r.displayStatus === 'Paid') return false
+      if (filterStatus && r.displayStatus !== filterStatus) return false
+      if (filterClass && !r.children.some(k => k.class_name === filterClass)) return false
       if (q) {
-        const hay = `${f.children?.full_name || ''} ${f.children?.parent_name || ''}`.toLowerCase()
+        const hay = `${r.family.family_name} ${r.family.primary_parent_name || ''} ${r.family.primary_parent_phone || ''} ${r.children.map(k => k.full_name).join(' ')}`.toLowerCase()
         if (!hay.includes(q)) return false
       }
       return true
     })
-  }, [fees, pendingOnly, filterPeriod, filterPlan, filterStatus, filterClass, filterFamily, search])
 
+    // Sort by oldest overdue first, then by balance desc, then alpha
+    list.sort((a, b) => {
+      const aOD = a.oldestOverdueDate || '9999-12-31'
+      const bOD = b.oldestOverdueDate || '9999-12-31'
+      if (aOD !== bOD) return aOD.localeCompare(bOD)
+      if (a.account.balance !== b.account.balance) return b.account.balance - a.account.balance
+      return a.family.family_name.localeCompare(b.family.family_name)
+    })
+    return list
+  }, [rows, search, filterClass, filterStatus, showPaid])
+
+  // ---------- SUMMARY ----------
   const summary = useMemo(() => {
-    const expected = filtered.reduce((s, f) => s + Number(f.amount), 0)
-    const collected = filtered.reduce((s, f) => s + (paidByFee.get(f.id) || 0), 0)
-    const outstanding = Math.max(expected - collected, 0)
-    const overdue = filtered.filter(isOverdue).length
+    const visible = filtered
+    const expected = visible.reduce((s, r) => s + Number(r.account.total_fee), 0)
+    const collected = visible.reduce((s, r) => s + Number(r.account.paid_amount), 0)
+    const outstanding = visible.reduce((s, r) => s + Number(r.account.balance), 0)
+    const overdue = visible.filter(r => r.displayStatus === 'Overdue').length
     return { expected, collected, outstanding, overdue }
-  }, [filtered, paidByFee])
+  }, [filtered])
 
   const classSummary = useMemo(() => {
-    const map = new Map<string, { expected: number; collected: number; outstanding: number; count: number }>()
-    filtered.forEach(f => {
-      const cls = f.children?.class_name || '—'
-      const row = map.get(cls) || { expected: 0, collected: 0, outstanding: 0, count: 0 }
-      const amt = Number(f.amount)
-      const paid = paidByFee.get(f.id) || 0
-      row.expected += amt; row.collected += paid
-      row.outstanding += Math.max(amt - paid, 0); row.count += 1
-      map.set(cls, row)
+    const map = new Map<string, { families: number; expected: number; collected: number; outstanding: number }>()
+    filtered.forEach(r => {
+      r.children.forEach(k => {
+        const cls = k.class_name
+        const row = map.get(cls) || { families: 0, expected: 0, collected: 0, outstanding: 0 }
+        // Count family once per class (avoid double counting sibling totals)
+        row.families += 1
+        map.set(cls, row)
+      })
     })
+    // Family totals prorated per class is complex; instead sum per family only once.
+    // Simpler: assign full family total to each class its children are in — but that double counts.
+    // Better: show number of families only per class.
     return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]))
-  }, [filtered, paidByFee])
+  }, [filtered])
 
-  function resetForm() {
-    setForm({ ...emptyForm })
-    setEditingId(null)
-    setShowForm(false)
-  }
-
-  function startAdd() {
-    setForm({ ...emptyForm })
-    setEditingId(null)
-    setShowForm(true)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
-  }
-
-  function startEdit(f: Fee) {
-    const plan = planOf(f.month_year)
-    setForm({
-      child_id: f.child_id, plan,
-      month_year: plan === 'monthly' ? f.month_year : currentMonth(),
-      year: plan === 'annual' ? f.month_year : currentYear(),
-      amount: String(f.amount), status: f.status,
-      last_payment_date: f.last_payment_date || '',
-      notes: f.notes || '',
-    })
-    setEditingId(f.id); setShowForm(true)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
-  }
-
-  function setPlan(plan: PlanType) {
-    setForm({ ...form, plan, amount: String(plan === 'monthly' ? MONTHLY_AMOUNT : ANNUAL_AMOUNT) })
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!form.child_id) { showBanner('error', 'Please select a child.'); return }
-    const period = form.plan === 'monthly' ? form.month_year : form.year
-    if (!period) { showBanner('error', 'Please pick a period.'); return }
-
-    setSaving(true)
-    const payload: Record<string, unknown> = {
-      child_id: form.child_id, month_year: period,
-      amount: Number(form.amount) || 0, notes: form.notes.trim(),
-      updated_at: new Date().toISOString(),
-    }
-    if (form.plan === 'monthly') {
-      const [y, m] = period.split('-').map(Number)
-      payload.due_date = `${y}-${String(m).padStart(2,'0')}-10`
-    }
-
-    let error
-    if (editingId) {
-      ({ error } = await supabase.from('fees').update(payload).eq('id', editingId))
-    } else {
-      ({ error } = await supabase.from('fees').upsert(
-        { ...payload, status: form.status, last_payment_date: form.last_payment_date || null },
-        { onConflict: 'child_id,month_year' }
-      ))
-    }
-    setSaving(false)
-    if (error) { showBanner('error', error.message); return }
-    showBanner('success', editingId ? 'Fee updated.' : 'Fee saved.')
-    resetForm(); await loadAll()
-  }
-
-  async function deleteFee(f: Fee) {
-    if (!confirm(`Delete the fee record for ${f.children?.full_name} (${f.month_year})?\n\nLinked payments will be unlinked.`)) return
-    const { error } = await supabase.from('fees').delete().eq('id', f.id)
-    if (error) { showBanner('error', error.message); return }
-    showBanner('success', 'Fee record deleted.')
-    await loadAll()
-  }
-
-  function openPayModal(f: Fee) {
-    const paid = paidByFee.get(f.id) || 0
-    const balance = Math.max(Number(f.amount) - paid, 0)
-    setPayModalFee(f); setPayAmount(String(balance || f.amount))
-    setPayMethod('Cash'); setPayDate(todayISO()); setPayNote('')
+  // ---------- PAYMENT ----------
+  function openPayModal(account: Account) {
+    setPayModalAccount(account)
+    setPayAmount(String(account.monthly_installment || account.balance))
+    setPayMethod('Cash')
+    setPayDate(todayISO())
+    setPayNote('')
   }
 
   async function savePayment() {
-    if (!payModalFee) return
+    if (!payModalAccount) return
     const amt = Number(payAmount)
     if (!amt || amt <= 0) { showBanner('error', 'Enter a valid amount.'); return }
 
     setPaySaving(true)
-    const { data: receiptData } = await supabase.rpc('next_receipt_no')
+    const { data: receiptData } = await supabase.rpc('next_receipt_no_family')
     const receipt = (receiptData as unknown as string) || `L-${Date.now().toString().slice(-4)}`
 
-    const { error } = await supabase.from('fee_payments').insert({
-      fee_id: payModalFee.id, fee_plan_id: payModalFee.fee_plan_id,
-      child_id: payModalFee.child_id, paid_on: payDate,
-      amount: amt, method: payMethod, receipt_no: receipt,
-      for_month: payModalFee.month_year, note: payNote.trim(),
+    const { error } = await supabase.from('family_fee_payments').insert({
+      family_fee_account_id: payModalAccount.id,
+      family_id: payModalAccount.family_id,
+      paid_on: payDate,
+      amount: amt,
+      method: payMethod,
+      receipt_no: receipt,
+      note: payNote.trim(),
       recorded_by: userName,
     })
     setPaySaving(false)
     if (error) { showBanner('error', error.message); return }
     showBanner('success', `Payment recorded (${receipt}).`)
-    setPayModalFee(null); await loadAll()
+    setPayModalAccount(null)
+    await loadAll()
   }
 
-  async function deletePayment(p: Payment) {
-    if (!confirm(`Delete payment ${p.receipt_no || ''} of Rs ${p.amount}?`)) return
-    const { error } = await supabase.from('fee_payments').delete().eq('id', p.id)
+  // ---------- EDIT TOTAL FEE ----------
+  function openEdit(account: Account) {
+    setEditAccount(account)
+    setEditTotal(String(account.total_fee))
+    setEditReason('')
+  }
+
+  async function saveEditTotal() {
+    if (!editAccount) return
+    const t = Number(editTotal)
+    if (!t || t < 0) { showBanner('error', 'Enter a valid total.'); return }
+    setEditSaving(true)
+    const { error } = await supabase
+      .from('family_fee_accounts')
+      .update({ total_fee: t, notes: editReason.trim() || editAccount.notes || '' })
+      .eq('id', editAccount.id)
+    setEditSaving(false)
     if (error) { showBanner('error', error.message); return }
-    showBanner('success', 'Payment deleted.'); await loadAll()
+    // Manually trigger recompute (in case trigger only fires on payment changes)
+    await supabase.rpc('recompute_family_account', { p_account_id: editAccount.id })
+    showBanner('success', 'Total fee updated.')
+    setEditAccount(null)
+    await loadAll()
   }
 
-  async function runBulkGenerate() {
-    const period = bulkPlan === 'monthly' ? bulkMonth : bulkYear
-    if (!period) { showBanner('error', 'Pick a period.'); return }
-    const targets = children.filter(c => !bulkClass || c.class_name === bulkClass)
-    if (!targets.length) { showBanner('error', 'No active children match.'); return }
-
-    const existing = new Set(fees.filter(f => f.month_year === period).map(f => f.child_id))
-    const toCreate = targets.filter(c => !existing.has(c.id))
-    if (!toCreate.length) { showBanner('success', `All already have a ${period} record.`); return }
-    if (!confirm(`Create Pending records for ${toCreate.length} children for ${period} at Rs ${bulkAmount}?`)) return
-
-    setBulkBusy(true)
-    const rows = toCreate.map(c => ({
-      child_id: c.id, month_year: period,
-      amount: Number(bulkAmount) || (bulkPlan === 'monthly' ? MONTHLY_AMOUNT : ANNUAL_AMOUNT),
-      status: 'Pending' as const, notes: '',
-      due_date: bulkPlan === 'monthly'
-        ? `${period.slice(0,4)}-${period.slice(5,7)}-10`
-        : `${period}-04-10`,
-    }))
-    const { error } = await supabase.from('fees').insert(rows)
-    setBulkBusy(false)
-    if (error) { showBanner('error', error.message); return }
-    showBanner('success', `Created ${rows.length} records.`)
-    setShowBulk(false); await loadAll()
-  }
-
+  // ---------- CSV ----------
   function exportCSV() {
-    const header = ['Child','Class','Family','Parent','Phone','Plan','Period','Target','Paid','Balance','Status','Receipts','Child Total Balance']
+    const header = ['Family','Parent','Phone','Classes','Children','Total Fee','Paid','Balance','Monthly','Next Due','Status']
     const esc = (v: unknown) => {
       const s = v == null ? '' : String(v)
       return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s
     }
     const lines = [header.join(',')]
-    filtered.forEach(f => {
-      const paid = paidByFee.get(f.id) || 0
-      const bal = Math.max(Number(f.amount) - paid, 0)
-      const rcs = (paymentsByFee.get(f.id) || []).map(p => p.receipt_no).filter(Boolean).join(' | ')
-      const cTot = childTotals.get(f.child_id)?.balance ?? 0
-      const fam = f.children?.family_id ? familyById.get(f.children.family_id)?.family_name || '' : ''
+    filtered.forEach(r => {
       lines.push([
-        f.children?.full_name, f.children?.class_name, fam, f.children?.parent_name, f.children?.parent_phone,
-        planOf(f.month_year), f.month_year, f.amount, paid, bal, f.status, rcs, cTot,
+        r.family.family_name,
+        r.family.primary_parent_name || '',
+        r.family.primary_parent_phone || '',
+        r.classes,
+        r.children.map(k => k.full_name).join(' | '),
+        r.account.total_fee,
+        r.account.paid_amount,
+        r.account.balance,
+        r.account.monthly_installment,
+        r.nextDue?.due_date || '',
+        r.displayStatus,
       ].map(esc).join(','))
     })
     const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    a.href = url; a.download = `fees_${todayISO()}.csv`; a.click()
+    a.href = url; a.download = `families_fees_${todayISO()}.csv`; a.click()
     URL.revokeObjectURL(url)
   }
 
-  // Ledger for a child
-  const ledgerChild = useMemo(
-    () => children.find(c => c.id === ledgerChildId) || null,
-    [children, ledgerChildId]
+  // ---------- LEDGER ----------
+  const ledgerFamily = useMemo(
+    () => families.find(f => f.id === ledgerFamilyId) || null,
+    [families, ledgerFamilyId]
   )
-  const ledgerFees = useMemo(() => {
-    if (!ledgerChildId) return []
-    return fees
-      .filter(f => f.child_id === ledgerChildId)
-      .sort((a, b) => a.month_year.localeCompare(b.month_year))
-  }, [fees, ledgerChildId])
-  const ledgerTotals = useMemo(() => {
-    const expected = ledgerFees.reduce((s, f) => s + Number(f.amount), 0)
-    const paid = ledgerFees.reduce((s, f) => s + (paidByFee.get(f.id) || 0), 0)
-    return { expected, paid, balance: Math.max(expected - paid, 0) }
-  }, [ledgerFees, paidByFee])
-  const ledgerSiblings = useMemo(() => {
-    if (!ledgerChild?.family_id) return []
-    return children.filter(c => c.family_id === ledgerChild.family_id && c.id !== ledgerChild.id)
-  }, [children, ledgerChild])
+  const ledgerAccount = useMemo(
+    () => accounts.find(a => a.family_id === ledgerFamilyId) || null,
+    [accounts, ledgerFamilyId]
+  )
+  const ledgerChildren = useMemo(
+    () => children.filter(c => c.family_id === ledgerFamilyId && c.is_active),
+    [children, ledgerFamilyId]
+  )
+  const ledgerPayments = useMemo(
+    () => payments.filter(p => p.family_id === ledgerFamilyId).sort((a, b) => b.paid_on.localeCompare(a.paid_on)),
+    [payments, ledgerFamilyId]
+  )
+  const ledgerInstallments = useMemo(
+    () => installments.filter(i => i.family_fee_account_id === ledgerAccount?.id).sort((a, b) => a.due_date.localeCompare(b.due_date)),
+    [installments, ledgerAccount]
+  )
 
   if (loading) {
     return <AppShell userName={userName}><div style={{ padding: 40, textAlign: 'center', color: '#718096' }}>Loading fees…</div></AppShell>
@@ -471,14 +408,9 @@ export default function FeesPage() {
         <h2>Fee Tracker</h2>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {canEdit && (
-            <button className="btn btn-secondary" onClick={() => setShowBulk(!showBulk)}>
-              {showBulk ? 'Cancel Bulk' : '⚡ Generate'}
-            </button>
-          )}
-          {canEdit && (
-            <button className="btn btn-primary" onClick={showForm ? resetForm : startAdd}>
-              {showForm ? 'Cancel' : '+ Add / Update Fee'}
-            </button>
+            <Link href="/admissions/new" className="btn btn-primary">
+              + New Admission
+            </Link>
           )}
         </div>
       </div>
@@ -492,115 +424,22 @@ export default function FeesPage() {
         }}>{banner.message}</div>
       )}
 
-      {showBulk && (
-        <div className="card">
-          <div className="card-title">⚡ Generate Pending Fees</div>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Plan *</label>
-              <select value={bulkPlan} onChange={e => {
-                const p = e.target.value as PlanType
-                setBulkPlan(p); setBulkAmount(String(p === 'monthly' ? MONTHLY_AMOUNT : ANNUAL_AMOUNT))
-              }}>
-                <option value="monthly">Monthly</option>
-                <option value="annual">Annual</option>
-              </select>
-            </div>
-            <div className="form-group">
-              <label>{bulkPlan === 'monthly' ? 'Month *' : 'Year *'}</label>
-              {bulkPlan === 'monthly'
-                ? <input type="month" value={bulkMonth} onChange={e => setBulkMonth(e.target.value)} />
-                : <input type="number" value={bulkYear} onChange={e => setBulkYear(e.target.value)} />}
-            </div>
-          </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Class</label>
-              <select value={bulkClass} onChange={e => setBulkClass(e.target.value)}>
-                <option value="">All classes</option>
-                {CLASS_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-            <div className="form-group">
-              <label>Amount (Rs) *</label>
-              <input type="number" value={bulkAmount} onChange={e => setBulkAmount(e.target.value)} />
-            </div>
-          </div>
-          <button className="btn btn-primary" onClick={runBulkGenerate} disabled={bulkBusy}>
-            {bulkBusy ? 'Generating…' : `Generate for ${bulkPlan === 'monthly' ? bulkMonth : bulkYear}`}
-          </button>
-        </div>
-      )}
-
-      {showForm && canEdit && (
-        <div className="card">
-          <div className="card-title">{editingId ? 'Edit Fee Record' : 'Add / Update Fee Record'}</div>
-          <form onSubmit={handleSubmit}>
-            <div className="form-row">
-              <div className="form-group">
-                <label>Child *</label>
-                <select required value={form.child_id} onChange={e => setForm({ ...form, child_id: e.target.value })} disabled={!!editingId}>
-                  <option value="">Select child</option>
-                  {children.map(c => <option key={c.id} value={c.id}>{c.full_name} ({c.class_name})</option>)}
-                </select>
-              </div>
-              <div className="form-group">
-                <label>Plan *</label>
-                <select value={form.plan} onChange={e => setPlan(e.target.value as PlanType)} disabled={!!editingId}>
-                  <option value="monthly">Monthly</option>
-                  <option value="annual">Annual</option>
-                </select>
-              </div>
-            </div>
-            <div className="form-row">
-              <div className="form-group">
-                <label>{form.plan === 'monthly' ? 'Month *' : 'Year *'}</label>
-                {form.plan === 'monthly'
-                  ? <input required type="month" value={form.month_year} onChange={e => setForm({ ...form, month_year: e.target.value })} disabled={!!editingId} />
-                  : <input required type="number" value={form.year} onChange={e => setForm({ ...form, year: e.target.value })} disabled={!!editingId} />}
-              </div>
-              <div className="form-group">
-                <label>Amount (Rs) *</label>
-                <input required type="number" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} />
-              </div>
-            </div>
-            <div className="form-row">
-              <div className="form-group">
-                <label>Status (initial)</label>
-                <select value={form.status} onChange={e => setForm({ ...form, status: e.target.value as any })}>
-                  <option value="Pending">Pending</option>
-                  <option value="Partial">Partial</option>
-                  <option value="Paid">Paid</option>
-                </select>
-              </div>
-              <div className="form-group">
-                <label>Discount / Notes</label>
-                <input value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} placeholder="e.g. 10% sibling discount" />
-              </div>
-            </div>
-            <button type="submit" className="btn btn-primary" disabled={saving}>
-              {saving ? 'Saving…' : editingId ? 'Update Fee' : 'Save Fee'}
-            </button>
-          </form>
-        </div>
-      )}
-
       <div className="card">
         <div className="grid" style={{ marginBottom: 16 }}>
           <div className="stat info">
             <div className="label">Expected</div>
-            <div className="value">Rs {summary.expected.toLocaleString('en-IN')}</div>
+            <div className="value">{formatRs(summary.expected)}</div>
           </div>
           <div className="stat">
             <div className="label">Collected</div>
-            <div className="value" style={{ color: '#2f855a' }}>Rs {summary.collected.toLocaleString('en-IN')}</div>
+            <div className="value" style={{ color: '#2f855a' }}>{formatRs(summary.collected)}</div>
           </div>
           <div className="stat warning">
             <div className="label">Outstanding</div>
-            <div className="value">Rs {summary.outstanding.toLocaleString('en-IN')}</div>
+            <div className="value">{formatRs(summary.outstanding)}</div>
           </div>
           <div className="stat danger">
-            <div className="label">Overdue</div>
+            <div className="label">Overdue families</div>
             <div className="value">{summary.overdue}</div>
           </div>
         </div>
@@ -616,18 +455,149 @@ export default function FeesPage() {
             <table>
               <thead>
                 <tr>
-                  <th>Class</th><th>Records</th><th>Expected</th><th>Collected</th><th>Outstanding</th>
+                  <th>Class</th>
+                  <th>Families with children in this class</th>
                 </tr>
               </thead>
               <tbody>
                 {classSummary.map(([cls, r]) => (
                   <tr key={cls}>
                     <td><strong>{cls}</strong></td>
-                    <td>{r.count}</td>
-                    <td>Rs {r.expected.toLocaleString('en-IN')}</td>
-                    <td style={{ color: '#2f855a' }}>Rs {r.collected.toLocaleString('en-IN')}</td>
-                    <td style={{ color: r.outstanding > 0 ? '#c53030' : '#2f855a' }}>
-                      Rs {r.outstanding.toLocaleString('en-IN')}
+                    <td>{r.families}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p style={{ color: '#718096', fontSize: '0.8rem', marginTop: 8 }}>
+              (Family totals span multiple classes when siblings are enrolled — using the Family filter gives precise numbers.)
+            </p>
+          </div>
+        )}
+
+        {/* Filters */}
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12 }}>
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 240, flex: 1 }}>
+            <label>Search</label>
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Family, parent, phone or child name…"
+            />
+          </div>
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 140 }}>
+            <label>Class</label>
+            <select value={filterClass} onChange={e => setFilterClass(e.target.value)}>
+              <option value="">All classes</option>
+              {availableClasses.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 140 }}>
+            <label>Status</label>
+            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
+              <option value="">All</option>
+              <option value="Overdue">Overdue</option>
+              <option value="Pending">Pending</option>
+              <option value="Paid">Paid</option>
+            </select>
+          </div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.9rem', marginTop: 18, cursor: 'pointer' }}>
+            <input type="checkbox" checked={showPaid} onChange={e => setShowPaid(e.target.checked)} />
+            Show paid families
+          </label>
+          <button className="btn btn-secondary" onClick={exportCSV}>⬇ CSV</button>
+        </div>
+
+        <div className="card-title" style={{ marginTop: 0 }}>
+          Showing {filtered.length} families · {formatRs(summary.outstanding)} outstanding
+        </div>
+
+        {filtered.length === 0 ? (
+          <p style={{ color: '#718096' }}>
+            {rows.length === 0
+              ? 'No fee accounts yet. Use “+ New Admission” to create one.'
+              : 'No families match these filters.'}
+          </p>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Family</th>
+                  <th>Children</th>
+                  <th>Classes</th>
+                  <th>Total Fee</th>
+                  <th>Paid</th>
+                  <th>Balance</th>
+                  <th>Monthly</th>
+                  <th>Next Due</th>
+                  <th>Status</th>
+                  <th style={{ width: 220 }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map(r => (
+                  <tr key={r.family.id}>
+                    <td>
+                      <div><strong>{r.family.family_name}</strong></div>
+                      <div style={{ fontSize: '0.8rem', color: '#718096' }}>
+                        {r.family.primary_parent_name || '—'} · {r.family.primary_parent_phone || '—'}
+                      </div>
+                    </td>
+                    <td>
+                      <div style={{ fontSize: '0.85rem' }}>
+                        {r.children.map(k => (
+                          <div key={k.id}>{k.full_name}</div>
+                        ))}
+                      </div>
+                    </td>
+                    <td style={{ fontSize: '0.85rem' }}>{r.classes}</td>
+                    <td>{formatRs(r.account.total_fee)}</td>
+                    <td style={{ color: '#2f855a' }}>{formatRs(r.account.paid_amount)}</td>
+                    <td style={{ color: Number(r.account.balance) > 0 ? '#c53030' : '#2f855a', fontWeight: 600 }}>
+                      {formatRs(r.account.balance)}
+                    </td>
+                    <td>{Number(r.account.balance) > 0 ? formatRsPrecise(r.account.monthly_installment) : '—'}</td>
+                    <td>
+                      {r.nextDue ? (
+                        <div>
+                          <div style={{ fontSize: '0.85rem' }}>{formatDate(r.nextDue.due_date)}</div>
+                          <div style={{ fontSize: '0.75rem', color: '#718096' }}>{monthLabel(r.nextDue.month_year)}</div>
+                        </div>
+                      ) : '—'}
+                    </td>
+                    <td>
+                      {r.displayStatus === 'Paid' && <span className="badge badge-green">✓ Paid</span>}
+                      {r.displayStatus === 'Pending' && <span className="badge badge-yellow">Pending</span>}
+                      {r.displayStatus === 'Overdue' && <span className="badge badge-red">⚠️ Overdue</span>}
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {canEdit && Number(r.account.balance) > 0 && (
+                          <button
+                            className="btn btn-sm btn-success"
+                            onClick={() => openPayModal(r.account)}
+                            title="Record Payment"
+                          >
+                            💵 Pay
+                          </button>
+                        )}
+                        <button
+                          className="btn btn-sm btn-secondary"
+                          onClick={() => setLedgerFamilyId(r.family.id)}
+                          title="View ledger"
+                        >
+                          👁 Ledger
+                        </button>
+                        {canEdit && (
+                          <button
+                            className="btn btn-sm btn-secondary"
+                            onClick={() => openEdit(r.account)}
+                            title="Edit total fee"
+                          >
+                            ✏️
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -635,301 +605,20 @@ export default function FeesPage() {
             </table>
           </div>
         )}
-
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12 }}>
-          <div className="form-group" style={{ marginBottom: 0, minWidth: 130 }}>
-            <label>Plan</label>
-            <select value={filterPlan} onChange={e => setFilterPlan(e.target.value as any)}>
-              <option value="">All</option>
-              <option value="monthly">Monthly</option>
-              <option value="annual">Annual</option>
-            </select>
-          </div>
-          <div className="form-group" style={{ marginBottom: 0, minWidth: 130 }}>
-            <label>Period</label>
-            <select value={filterPeriod} onChange={e => setFilterPeriod(e.target.value)}>
-              <option value="">All</option>
-              {availablePeriods.map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </div>
-          <div className="form-group" style={{ marginBottom: 0, minWidth: 120 }}>
-            <label>Status</label>
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
-              <option value="">All</option>
-              <option value="Paid">Paid</option>
-              <option value="Partial">Partial</option>
-              <option value="Pending">Pending</option>
-            </select>
-          </div>
-          <div className="form-group" style={{ marginBottom: 0, minWidth: 120 }}>
-            <label>Class</label>
-            <select value={filterClass} onChange={e => setFilterClass(e.target.value)}>
-              <option value="">All</option>
-              {availableClasses.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-          <div className="form-group" style={{ marginBottom: 0, minWidth: 160 }}>
-            <label>Family</label>
-            <select value={filterFamily} onChange={e => setFilterFamily(e.target.value)}>
-              <option value="">All families</option>
-              {availableFamilies.map(f => <option key={f.id} value={f.id}>{f.family_name}</option>)}
-            </select>
-          </div>
-          <div className="form-group" style={{ marginBottom: 0, minWidth: 160, flex: 1 }}>
-            <label>Search child or parent</label>
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Name…" />
-          </div>
-          <button className="btn btn-secondary" onClick={exportCSV}>⬇ CSV</button>
-        </div>
-
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
-          <button
-            className={pendingOnly ? 'btn btn-sm btn-primary' : 'btn btn-sm btn-secondary'}
-            onClick={() => setPendingOnly(!pendingOnly)}
-          >
-            ⚡ Pending only {pendingOnly ? '✓' : ''}
-          </button>
-          <span style={{ color: '#718096', fontSize: '0.85rem' }}>
-            Showing {filtered.length} of {fees.length}
-          </span>
-        </div>
-
-        {filtered.length === 0 ? (
-          <p style={{ color: '#718096' }}>No records match.</p>
-        ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>Child</th>
-                  <th>Class</th>
-                  <th>Family</th>
-                  <th>Plan</th>
-                  <th>Period</th>
-                  <th>Target</th>
-                  <th>Paid</th>
-                  <th>Balance</th>
-                  <th>Child Year Balance</th>
-                  <th>Status</th>
-                  <th style={{ width: 230 }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map(f => {
-                  const plan = planOf(f.month_year)
-                  const paid = paidByFee.get(f.id) || 0
-                  const balance = Math.max(Number(f.amount) - paid, 0)
-                  const overdue = isOverdue(f)
-                  const childBal = childTotals.get(f.child_id)?.balance ?? 0
-                  const fam = f.children?.family_id ? familyById.get(f.children.family_id) : null
-
-                  return (
-                    <tr key={f.id} style={{ background: overdue ? '#fff5f5' : undefined }}>
-                      <td><strong>{f.children?.full_name}</strong></td>
-                      <td>{f.children?.class_name}</td>
-                      <td>
-                        {fam ? (
-                          <button
-                            className="btn btn-sm btn-secondary"
-                            onClick={() => setLedgerChildId(f.child_id)}
-                            title="Open child ledger"
-                          >
-                            {fam.family_name}
-                          </button>
-                        ) : '—'}
-                      </td>
-                      <td>
-                        <span className={`badge ${plan === 'annual' ? 'badge-blue' : 'badge-gray'}`}>
-                          {plan === 'annual' ? 'Annual' : 'Monthly'}
-                        </span>
-                      </td>
-                      <td>{f.month_year}</td>
-                      <td>Rs {Number(f.amount).toLocaleString('en-IN')}</td>
-                      <td style={{ color: paid > 0 ? '#2f855a' : undefined }}>
-                        Rs {paid.toLocaleString('en-IN')}
-                      </td>
-                      <td style={{ color: balance > 0 ? '#c53030' : '#2f855a' }}>
-                        Rs {balance.toLocaleString('en-IN')}
-                      </td>
-                      <td style={{ color: childBal > 0 ? '#c53030' : '#2f855a', fontWeight: 600 }}>
-                        Rs {childBal.toLocaleString('en-IN')}
-                      </td>
-                      <td>
-                        <span className={`badge ${f.status === 'Paid' ? 'badge-green' : f.status === 'Partial' ? 'badge-yellow' : 'badge-red'}`}>
-                          {f.status}
-                        </span>
-                        {overdue && <span className="badge badge-red" style={{ marginLeft: 6 }}>⚠️</span>}
-                      </td>
-                      <td>
-                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          {canEdit && (
-                            <button className="btn btn-sm btn-success" onClick={() => openPayModal(f)} title="Record Payment">
-                              💵 Pay
-                            </button>
-                          )}
-                          <button className="btn btn-sm btn-secondary" onClick={() => setLedgerChildId(f.child_id)} title="Child ledger">
-                            👁
-                          </button>
-                          {canEdit && (
-                            <button className="btn btn-sm btn-secondary" onClick={() => startEdit(f)}>✏️</button>
-                          )}
-                          {canEdit && (
-                            <button className="btn btn-sm btn-secondary"
-                              style={{ color: '#c53030', borderColor: '#fc8181' }}
-                              onClick={() => deleteFee(f)}>🗑</button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
 
-      {/* CHILD LEDGER DRAWER */}
-      {ledgerChild && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
-          display: 'flex', justifyContent: 'flex-end', zIndex: 1000,
-        }} onClick={() => setLedgerChildId(null)}>
-          <div
-            style={{ width: '100%', maxWidth: 720, background: 'white', height: '100%', overflowY: 'auto', padding: 24 }}
-            onClick={e => e.stopPropagation()}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
-              <div>
-                <h3 style={{ margin: 0 }}>{ledgerChild.full_name}</h3>
-                <div style={{ fontSize: '0.9rem', color: '#4a5568' }}>
-                  {ledgerChild.class_name} · {ledgerChild.parent_name || '—'} · {ledgerChild.parent_phone || '—'}
-                </div>
-                {ledgerChild.family_id && familyById.get(ledgerChild.family_id) && (
-                  <div style={{ fontSize: '0.85rem', color: '#2b6cb0', marginTop: 4 }}>
-                    Family: {familyById.get(ledgerChild.family_id)?.family_name}
-                  </div>
-                )}
-              </div>
-              <button className="btn btn-secondary" onClick={() => setLedgerChildId(null)}>Close</button>
-            </div>
-
-            <div className="grid" style={{ marginBottom: 16 }}>
-              <div className="stat info">
-                <div className="label">Expected</div>
-                <div className="value">Rs {ledgerTotals.expected.toLocaleString('en-IN')}</div>
-              </div>
-              <div className="stat">
-                <div className="label">Paid</div>
-                <div className="value" style={{ color: '#2f855a' }}>Rs {ledgerTotals.paid.toLocaleString('en-IN')}</div>
-              </div>
-              <div className="stat warning">
-                <div className="label">Balance</div>
-                <div className="value">Rs {ledgerTotals.balance.toLocaleString('en-IN')}</div>
-              </div>
-            </div>
-
-            <h4 style={{ marginTop: 20 }}>Fee Schedule</h4>
-            <table>
-              <thead>
-                <tr>
-                  <th>Period</th>
-                  <th>Target</th>
-                  <th>Paid</th>
-                  <th>Balance</th>
-                  <th>Status</th>
-                  <th>Payments</th>
-                </tr>
-              </thead>
-              <tbody>
-                {ledgerFees.map(f => {
-                  const paid = paidByFee.get(f.id) || 0
-                  const bal = Math.max(Number(f.amount) - paid, 0)
-                  const pays = paymentsByFee.get(f.id) || []
-                  return (
-                    <tr key={f.id}>
-                      <td><strong>{f.month_year}</strong></td>
-                      <td>Rs {Number(f.amount).toLocaleString('en-IN')}</td>
-                      <td style={{ color: '#2f855a' }}>Rs {paid.toLocaleString('en-IN')}</td>
-                      <td style={{ color: bal > 0 ? '#c53030' : '#2f855a' }}>Rs {bal.toLocaleString('en-IN')}</td>
-                      <td>
-                        <span className={`badge ${f.status === 'Paid' ? 'badge-green' : f.status === 'Partial' ? 'badge-yellow' : 'badge-red'}`}>
-                          {f.status}
-                        </span>
-                      </td>
-                      <td>
-                        {pays.length === 0 ? <span style={{ color: '#a0aec0' }}>—</span> : (
-                          <div style={{ fontSize: '0.8rem' }}>
-                            {pays.map(p => (
-                              <div key={p.id}>
-                                {p.paid_on} · Rs {Number(p.amount).toLocaleString('en-IN')} · {p.receipt_no || '—'}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-
-            {ledgerSiblings.length > 0 && (
-              <>
-                <h4 style={{ marginTop: 24 }}>Siblings in this family</h4>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Name</th>
-                      <th>Class</th>
-                      <th>Year Balance</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {ledgerSiblings.map(s => {
-                      const sBal = childTotals.get(s.id)?.balance ?? 0
-                      return (
-                        <tr key={s.id}>
-                          <td><strong>{s.full_name}</strong></td>
-                          <td>{s.class_name}</td>
-                          <td style={{ color: sBal > 0 ? '#c53030' : '#2f855a', fontWeight: 600 }}>
-                            Rs {sBal.toLocaleString('en-IN')}
-                          </td>
-                          <td>
-                            <button className="btn btn-sm btn-secondary" onClick={() => setLedgerChildId(s.id)}>
-                              👁 View
-                            </button>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-                <div style={{ marginTop: 12, padding: 12, background: '#ebf8ff', borderRadius: 6, fontSize: '0.9rem' }}>
-                  <strong>Family total balance:</strong>{' '}
-                  Rs {(ledgerTotals.balance + ledgerSiblings.reduce((s, k) => s + (childTotals.get(k.id)?.balance ?? 0), 0)).toLocaleString('en-IN')}
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* PAYMENT MODAL */}
-      {payModalFee && (
+      {/* ---------- RECORD PAYMENT MODAL ---------- */}
+      {payModalAccount && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16,
         }}>
-          <div className="card" style={{ maxWidth: 480, width: '100%', margin: 0 }}>
+          <div className="card" style={{ maxWidth: 520, width: '100%', margin: 0 }}>
             <div className="card-title">💵 Record Payment</div>
             <div style={{ marginBottom: 12, fontSize: '0.9rem', color: '#4a5568' }}>
-              <div><strong>{payModalFee.children?.full_name}</strong> · {payModalFee.children?.class_name}</div>
-              <div>For: <strong>{payModalFee.month_year}</strong></div>
-              <div>Target: Rs {Number(payModalFee.amount).toLocaleString('en-IN')} ·
-                Paid: Rs {(paidByFee.get(payModalFee.id) || 0).toLocaleString('en-IN')} ·
-                Balance: Rs {Math.max(Number(payModalFee.amount) - (paidByFee.get(payModalFee.id) || 0), 0).toLocaleString('en-IN')}
+              <div><strong>{families.find(f => f.id === payModalAccount.family_id)?.family_name}</strong></div>
+              <div>
+                Balance: <strong>{formatRs(payModalAccount.balance)}</strong> · Monthly: <strong>{formatRsPrecise(payModalAccount.monthly_installment)}</strong>
               </div>
             </div>
             <div className="form-row">
@@ -958,11 +647,145 @@ export default function FeesPage() {
               <input value={payNote} onChange={e => setPayNote(e.target.value)} placeholder="Optional" />
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button className="btn btn-secondary" onClick={() => setPayModalFee(null)}>Cancel</button>
+              <button className="btn btn-secondary" onClick={() => setPayModalAccount(null)}>Cancel</button>
               <button className="btn btn-primary" onClick={savePayment} disabled={paySaving}>
                 {paySaving ? 'Saving…' : 'Save Payment'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- EDIT TOTAL FEE MODAL ---------- */}
+      {editAccount && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16,
+        }}>
+          <div className="card" style={{ maxWidth: 460, width: '100%', margin: 0 }}>
+            <div className="card-title">✏️ Edit Total Fee</div>
+            <p style={{ fontSize: '0.85rem', color: '#4a5568', marginTop: 0 }}>
+              Use this for special adjustments, year-end discounts, or corrections.
+              Installments will be recalculated automatically.
+            </p>
+            <div className="form-group">
+              <label>Total Fee (Rs) *</label>
+              <input type="number" value={editTotal} onChange={e => setEditTotal(e.target.value)} />
+            </div>
+            <div className="form-group">
+              <label>Reason / Note</label>
+              <input value={editReason} onChange={e => setEditReason(e.target.value)} placeholder="e.g. Year-end discount of Rs 2000" />
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button className="btn btn-secondary" onClick={() => setEditAccount(null)}>Cancel</button>
+              <button className="btn btn-primary" onClick={saveEditTotal} disabled={editSaving}>
+                {editSaving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- LEDGER DRAWER ---------- */}
+      {ledgerFamily && ledgerAccount && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+          display: 'flex', justifyContent: 'flex-end', zIndex: 1000,
+        }} onClick={() => { setLedgerFamilyId(null); setLedgerShowPayments(false) }}>
+          <div
+            style={{ width: '100%', maxWidth: 720, background: 'white', height: '100%', overflowY: 'auto', padding: 24 }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+              <div>
+                <h3 style={{ margin: 0 }}>{ledgerFamily.family_name}</h3>
+                <div style={{ fontSize: '0.9rem', color: '#4a5568' }}>
+                  {ledgerFamily.primary_parent_name || '—'} · {ledgerFamily.primary_parent_phone || '—'}
+                </div>
+              </div>
+              <button className="btn btn-secondary" onClick={() => setLedgerFamilyId(null)}>Close</button>
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Children</div>
+              {ledgerChildren.map(k => (
+                <div key={k.id} style={{ padding: '6px 10px', background: '#f7fafc', borderRadius: 6, marginBottom: 4 }}>
+                  <strong>{k.full_name}</strong> <span style={{ color: '#718096' }}>· {k.class_name}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid" style={{ marginBottom: 16 }}>
+              <div className="stat info">
+                <div className="label">Total Fee</div>
+                <div className="value">{formatRs(ledgerAccount.total_fee)}</div>
+              </div>
+              <div className="stat">
+                <div className="label">Paid</div>
+                <div className="value" style={{ color: '#2f855a' }}>{formatRs(ledgerAccount.paid_amount)}</div>
+              </div>
+              <div className="stat warning">
+                <div className="label">Balance</div>
+                <div className="value">{formatRs(ledgerAccount.balance)}</div>
+              </div>
+            </div>
+
+            {Number(ledgerAccount.balance) > 0 && (
+              <div style={{ padding: 12, background: '#ebf8ff', borderRadius: 6, fontSize: '0.9rem', marginBottom: 16 }}>
+                <strong>Monthly installment:</strong> {formatRsPrecise(ledgerAccount.monthly_installment)}
+                {ledgerInstallments.find(i => i.status !== 'Paid') && (
+                  <>
+                    {' · '}
+                    <strong>Next due:</strong> {formatDate(ledgerInstallments.find(i => i.status !== 'Paid')!.due_date)}
+                  </>
+                )}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+              {canEdit && Number(ledgerAccount.balance) > 0 && (
+                <button className="btn btn-primary" onClick={() => { openPayModal(ledgerAccount); setLedgerFamilyId(null) }}>
+                  💵 Record Payment
+                </button>
+              )}
+              <button className="btn btn-secondary" onClick={() => setLedgerShowPayments(!ledgerShowPayments)}>
+                {ledgerShowPayments ? '▼ Hide payment history' : '👁 View payment history'}
+              </button>
+            </div>
+
+            {ledgerShowPayments && (
+              <div>
+                <h4 style={{ marginTop: 0 }}>Payment History</h4>
+                {ledgerPayments.length === 0 ? (
+                  <p style={{ color: '#718096' }}>No payments recorded yet.</p>
+                ) : (
+                  <div style={{ overflowX: 'auto' }}>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Receipt</th>
+                          <th>Mode</th>
+                          <th>Amount</th>
+                          <th>Note</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ledgerPayments.map(p => (
+                          <tr key={p.id}>
+                            <td>{formatDate(p.paid_on)}</td>
+                            <td><strong>{p.receipt_no || '—'}</strong></td>
+                            <td>{p.method}</td>
+                            <td>Rs {Number(p.amount).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                            <td>{p.note || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
