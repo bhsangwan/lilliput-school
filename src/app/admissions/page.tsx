@@ -17,6 +17,7 @@ const CLASS_OPTIONS = [
 
 const DEFAULT_MONTHLY = 3500
 
+type PlanType = 'monthly' | 'annual'
 type Banner = { type: 'success' | 'error'; message: string } | null
 
 type ChildEntry = {
@@ -36,7 +37,7 @@ function currentYearMonth() {
   return new Date().toISOString().slice(0, 7)
 }
 
-// Compute months remaining: admission month → March next year (or same year if Jan-Mar)
+// Months remaining: admission month → March (same logic as before)
 function monthsRemainingFrom(admissionMonth: string): number {
   if (!/^\d{4}-\d{2}$/.test(admissionMonth)) return 12
   const [y, m] = admissionMonth.split('-').map(Number)
@@ -63,6 +64,7 @@ export default function NewAdmissionPage() {
 
   // Admission
   const [admissionMonth, setAdmissionMonth] = useState(currentYearMonth())
+  const [planType, setPlanType] = useState<PlanType>('monthly')
 
   // Children
   const [children, setChildren] = useState<ChildEntry[]>([
@@ -74,7 +76,11 @@ export default function NewAdmissionPage() {
   const [paymentMethod, setPaymentMethod] = useState('Cash')
   const [paymentNote, setPaymentNote] = useState('')
 
-  const monthsRemaining = useMemo(() => monthsRemainingFrom(admissionMonth), [admissionMonth])
+  // Effective months for calc: annual = 12, monthly = months remaining from admission
+  const effectiveMonths = useMemo(
+    () => (planType === 'annual' ? 12 : monthsRemainingFrom(admissionMonth)),
+    [planType, admissionMonth]
+  )
 
   useEffect(() => {
     async function init() {
@@ -89,7 +95,7 @@ export default function NewAdmissionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Lookup family when phone changes
+  // Lookup family by phone
   useEffect(() => {
     if (!parentPhone || parentPhone.length < 6) {
       setExistingFamilyId(null)
@@ -120,7 +126,6 @@ export default function NewAdmissionPage() {
     setTimeout(() => setBanner(null), 5000)
   }
 
-  // ---- child helpers ----
   function updateChild(key: string, patch: Partial<ChildEntry>) {
     setChildren(prev => prev.map(c => (c.key === key ? { ...c, ...patch } : c)))
   }
@@ -143,10 +148,9 @@ export default function NewAdmissionPage() {
     setChildren(prev => (prev.length > 1 ? prev.filter(c => c.key !== key) : prev))
   }
 
-  // ---- per-child computed ----
   function childSuggested(c: ChildEntry) {
     const monthly = Number(c.monthly_fee) || 0
-    return Math.round(monthly * monthsRemaining * 100) / 100
+    return Math.round(monthly * effectiveMonths * 100) / 100
   }
 
   function childFinal(c: ChildEntry) {
@@ -159,10 +163,9 @@ export default function NewAdmissionPage() {
   const familyTotal = useMemo(
     () => children.reduce((s, c) => s + childFinal(c), 0),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [children, monthsRemaining]
+    [children, effectiveMonths]
   )
 
-  // ---- submit ----
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
 
@@ -185,7 +188,6 @@ export default function NewAdmissionPage() {
     setSaving(true)
 
     try {
-      // 1. Family: use existing or create new
       let familyId = existingFamilyId
       if (!familyId) {
         const { data: fam, error: famErr } = await supabase
@@ -201,11 +203,9 @@ export default function NewAdmissionPage() {
         familyId = fam.id
       }
 
-      // 2. Admission date
       const [y, m] = admissionMonth.split('-').map(Number)
       const admissionDate = `${y}-${String(m).padStart(2, '0')}-05`
 
-      // 3. Create family_fee_accounts
       const { data: account, error: accErr } = await supabase
         .from('family_fee_accounts')
         .insert({
@@ -216,13 +216,13 @@ export default function NewAdmissionPage() {
           paid_amount: 0,
           balance: familyTotal,
           monthly_installment: 0,
+          plan_type: planType,
           notes: '',
         })
         .select('id')
         .single()
       if (accErr) throw accErr
 
-      // 4. Create each child + fee_plan
       for (let i = 0; i < children.length; i++) {
         const c = children[i]
         const suggested = childSuggested(c)
@@ -249,25 +249,26 @@ export default function NewAdmissionPage() {
           .insert({
             child_id: kid.id,
             academic_year: y,
-            plan_type: 'monthly',
+            plan_type: planType,
             base_fee: 42000,
             discount_amount: suggested - finalFee,
             final_fee: finalFee,
             discount_reason: disc > 0 ? `${disc}% sibling discount` : '',
-            installments: monthsRemaining,
-            amount_per_installment: Math.round((finalFee / monthsRemaining) * 100) / 100,
+            installments: planType === 'monthly' ? effectiveMonths : 1,
+            amount_per_installment: planType === 'monthly'
+              ? Math.round((finalFee / effectiveMonths) * 100) / 100
+              : finalFee,
             due_day: 10,
             notes: '',
             family_fee_account_id: account.id,
             admission_month: admissionMonth,
-            months_remaining: monthsRemaining,
+            months_remaining: effectiveMonths,
             suggested_fee: suggested,
             discount_percent: disc,
           })
         if (planErr) throw planErr
       }
 
-      // 5. Admission payment (if any)
       if (payAmt > 0) {
         const { data: receiptData } = await supabase.rpc('next_receipt_no_family')
         const receipt = (receiptData as unknown as string) || `L-${Date.now().toString().slice(-4)}`
@@ -287,7 +288,6 @@ export default function NewAdmissionPage() {
         if (payErr) throw payErr
       }
 
-      // Trigger will recompute; call explicitly to be safe
       await supabase.rpc('recompute_family_account', { p_account_id: account.id })
 
       showBanner('success', 'Admission created successfully! Redirecting…')
@@ -319,27 +319,21 @@ export default function NewAdmissionPage() {
       )}
 
       <form onSubmit={handleSubmit}>
-        {/* ---- FAMILY ---- */}
+        {/* FAMILY */}
         <div className="card">
           <div className="card-title">Family Details</div>
           <div className="form-row">
             <div className="form-group">
               <label>Parent Name *</label>
-              <input
-                required
-                value={parentName}
+              <input required value={parentName}
                 onChange={e => setParentName(e.target.value)}
-                placeholder="e.g. Mr. Bhavesh Sangwan"
-              />
+                placeholder="e.g. Mr. Bhavesh Sangwan" />
             </div>
             <div className="form-group">
               <label>Parent Phone *</label>
-              <input
-                required
-                value={parentPhone}
+              <input required value={parentPhone}
                 onChange={e => setParentPhone(e.target.value)}
-                placeholder="e.g. 9812345601"
-              />
+                placeholder="e.g. 9812345601" />
               {familyLookupDone && existingFamilyId && (
                 <div style={{ fontSize: '0.8rem', color: '#2b6cb0', marginTop: 4 }}>
                   ✓ Existing family found — children will be added to it.
@@ -355,32 +349,39 @@ export default function NewAdmissionPage() {
           {!existingFamilyId && (
             <div className="form-group">
               <label>Family Name</label>
-              <input
-                value={familyName}
+              <input value={familyName}
                 onChange={e => setFamilyName(e.target.value)}
-                placeholder="e.g. Sangwan Family (auto-generated if blank)"
-              />
+                placeholder="e.g. Sangwan Family (auto-generated if blank)" />
             </div>
           )}
         </div>
 
-        {/* ---- ADMISSION ---- */}
+        {/* ADMISSION */}
         <div className="card">
-          <div className="card-title">Admission</div>
+          <div className="card-title">Admission & Plan</div>
           <div className="form-row">
             <div className="form-group">
               <label>Admission Month *</label>
-              <input
-                required
-                type="month"
-                value={admissionMonth}
-                onChange={e => setAdmissionMonth(e.target.value)}
-              />
+              <input required type="month" value={admissionMonth}
+                onChange={e => setAdmissionMonth(e.target.value)} />
             </div>
             <div className="form-group">
-              <label>Months Remaining (auto)</label>
+              <label>Payment Plan *</label>
+              <select value={planType} onChange={e => setPlanType(e.target.value as PlanType)}>
+                <option value="monthly">Monthly — installments over remaining months</option>
+                <option value="annual">Annual — full year fee, paid in any installments</option>
+              </select>
+            </div>
+          </div>
+          <div className="form-row">
+            <div className="form-group">
+              <label>Months for Calculation (auto)</label>
               <input
-                value={`${monthsRemaining} months (${admissionMonth} → March)`}
+                value={
+                  planType === 'annual'
+                    ? '12 months (full year — annual plan)'
+                    : `${effectiveMonths} months (${admissionMonth} → March)`
+                }
                 readOnly
                 style={{ background: '#f7fafc' }}
               />
@@ -388,7 +389,7 @@ export default function NewAdmissionPage() {
           </div>
         </div>
 
-        {/* ---- CHILDREN ---- */}
+        {/* CHILDREN */}
         <div className="card">
           <div className="card-title">Children & Fees</div>
 
@@ -416,20 +417,14 @@ export default function NewAdmissionPage() {
                 <div className="form-row">
                   <div className="form-group">
                     <label>Full Name *</label>
-                    <input
-                      required
-                      value={c.full_name}
+                    <input required value={c.full_name}
                       onChange={e => updateChild(c.key, { full_name: e.target.value })}
-                      placeholder="e.g. Shiva Sangwan"
-                    />
+                      placeholder="e.g. Shiva Sangwan" />
                   </div>
                   <div className="form-group">
                     <label>Class *</label>
-                    <select
-                      required
-                      value={c.class_name}
-                      onChange={e => updateChild(c.key, { class_name: e.target.value })}
-                    >
+                    <select required value={c.class_name}
+                      onChange={e => updateChild(c.key, { class_name: e.target.value })}>
                       <option value="">Select class</option>
                       {CLASS_OPTIONS.map(cl => <option key={cl} value={cl}>{cl}</option>)}
                     </select>
@@ -439,40 +434,28 @@ export default function NewAdmissionPage() {
                 <div className="form-row">
                   <div className="form-group">
                     <label>Monthly Fee (Rs) *</label>
-                    <input
-                      required
-                      type="number"
-                      value={c.monthly_fee}
-                      onChange={e => updateChild(c.key, { monthly_fee: e.target.value })}
-                    />
+                    <input required type="number" value={c.monthly_fee}
+                      onChange={e => updateChild(c.key, { monthly_fee: e.target.value })} />
                   </div>
                   <div className="form-group">
-                    <label>Suggested Total ({monthsRemaining} × {c.monthly_fee})</label>
-                    <input
-                      readOnly
-                      value={`Rs ${suggested.toLocaleString('en-IN')}`}
-                      style={{ background: '#f7fafc' }}
-                    />
+                    <label>Suggested Total ({effectiveMonths} × {c.monthly_fee})</label>
+                    <input readOnly value={`Rs ${suggested.toLocaleString('en-IN')}`}
+                      style={{ background: '#f7fafc' }} />
                   </div>
                 </div>
 
                 <div className="form-row">
                   <div className="form-group">
                     <label>Discount % (0 = none, 25 = sibling)</label>
-                    <input
-                      type="number"
-                      value={c.discount_percent}
-                      onChange={e => updateChild(c.key, { discount_percent: e.target.value })}
-                    />
+                    <input type="number" value={c.discount_percent}
+                      onChange={e => updateChild(c.key, { discount_percent: e.target.value })} />
                   </div>
                   <div className="form-group">
                     <label>Final Fee (Rs) {!isOverride && <span style={{ color: '#a0aec0', fontWeight: 400 }}>— auto, editable</span>}</label>
-                    <input
-                      type="number"
+                    <input type="number"
                       value={isOverride ? c.final_fee_override : String(finalFee)}
                       onChange={e => updateChild(c.key, { final_fee_override: e.target.value })}
-                      placeholder={String(finalFee)}
-                    />
+                      placeholder={String(finalFee)} />
                     {isOverride && (
                       <div style={{ fontSize: '0.75rem', color: '#dd6b20', marginTop: 4 }}>
                         Override active — auto value would be Rs {finalFee.toLocaleString('en-IN')}
@@ -489,7 +472,7 @@ export default function NewAdmissionPage() {
           </button>
         </div>
 
-        {/* ---- FAMILY TOTAL ---- */}
+        {/* FAMILY TOTAL */}
         <div className="card">
           <div className="card-title">Family Total</div>
           <div className="grid" style={{ marginBottom: 12 }}>
@@ -498,8 +481,12 @@ export default function NewAdmissionPage() {
               <div className="value">{children.length}</div>
             </div>
             <div className="stat">
-              <div className="label">Months Remaining</div>
-              <div className="value">{monthsRemaining}</div>
+              <div className="label">Plan</div>
+              <div className="value" style={{ textTransform: 'capitalize' }}>{planType}</div>
+            </div>
+            <div className="stat">
+              <div className="label">Months</div>
+              <div className="value">{effectiveMonths}</div>
             </div>
             <div className="stat warning">
               <div className="label">Family Total Fee</div>
@@ -508,18 +495,15 @@ export default function NewAdmissionPage() {
           </div>
         </div>
 
-        {/* ---- ADMISSION PAYMENT ---- */}
+        {/* ADMISSION PAYMENT */}
         <div className="card">
           <div className="card-title">Payment Received at Admission (optional)</div>
           <div className="form-row">
             <div className="form-group">
               <label>Amount (Rs)</label>
-              <input
-                type="number"
-                value={paymentAmount}
+              <input type="number" value={paymentAmount}
                 onChange={e => setPaymentAmount(e.target.value)}
-                placeholder="Leave blank for no payment"
-              />
+                placeholder="Leave blank for no payment" />
             </div>
             <div className="form-group">
               <label>Method</label>
@@ -535,15 +519,12 @@ export default function NewAdmissionPage() {
           </div>
           <div className="form-group">
             <label>Note</label>
-            <input
-              value={paymentNote}
+            <input value={paymentNote}
               onChange={e => setPaymentNote(e.target.value)}
-              placeholder="e.g. Admission payment at time of joining"
-            />
+              placeholder="e.g. Admission payment at time of joining" />
           </div>
         </div>
 
-        {/* ---- ACTIONS ---- */}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginBottom: 40 }}>
           <Link href="/fees" className="btn btn-secondary">Cancel</Link>
           <button type="submit" className="btn btn-primary" disabled={saving}>
