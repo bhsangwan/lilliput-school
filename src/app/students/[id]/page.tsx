@@ -172,14 +172,13 @@ export default function StudentProfilePage() {
       .from('classes').select('*').eq('class_name', c.class_name).maybeSingle()
     setClassInfo(cls as ClassInfo)
 
-    // 4. Attendance (last 90 days)
-    const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
-    const { data: att } = await supabase
-      .from('attendance').select('*')
-      .eq('child_id', childId)
-      .gte('attendance_date', since)
-      .order('attendance_date')
-    setAttendance((att as Attendance[]) || [])
+    // 4. Attendance — all records for this child (from admission to today)
+const { data: att } = await supabase
+  .from('attendance')
+  .select('id, child_id, attendance_date, status')
+  .eq('child_id', childId)
+  .order('attendance_date', { ascending: true })
+setAttendance((att as Attendance[]) || [])
 
     // 5. Progress notes (last 5)
     const { data: prog } = await supabase
@@ -372,7 +371,7 @@ export default function StudentProfilePage() {
 
       {/* ATTENDANCE */}
       <div className="card">
-        <div className="card-title">📊 Attendance (last 90 days)</div>
+        <div className="card-title">📊 Attendance</div>
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginBottom: 12 }}>
           <div><strong style={{ fontSize: '1.4rem', color: '#2f855a' }}>{stats.present}</strong> <span style={{ color: '#718096' }}>Present</span></div>
           <div><strong style={{ fontSize: '1.4rem', color: '#c53030' }}>{stats.absent}</strong> <span style={{ color: '#718096' }}>Absent</span></div>
