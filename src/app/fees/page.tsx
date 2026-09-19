@@ -209,12 +209,7 @@ export default function FeesPage() {
       else displayStatus = 'Pending'
 
       out.push({
-        family: fam,
-        account: acc,
-        children: kids,
-        classes,
-        nextDue,
-        displayStatus,
+        family: fam, account: acc, children: kids, classes, nextDue, displayStatus,
       })
     })
     return out
@@ -256,27 +251,17 @@ export default function FeesPage() {
     const collected = filtered.reduce((s, r) => s + Number(r.account.paid_amount), 0)
     const outstanding = filtered.reduce((s, r) => s + Number(r.account.balance), 0)
     const overdueAmount = filtered.reduce((s, r) => s + Number(r.account.overdue_amount), 0)
-    const overdueCount = filtered.filter(r => Number(r.account.overdue_amount) > 0).length
-    return { expected, collected, outstanding, overdueAmount, overdueCount }
+    return { expected, collected, outstanding, overdueAmount }
   }, [filtered])
 
   function computePaySuggestion(account: Account) {
     if (Number(account.balance) <= 0) return ''
-
     if (account.plan_type === 'annual') return String(account.balance)
-
-    // Monthly: if overdue, use overdue; else current month's installment
     if (Number(account.overdue_amount) > 0) return String(account.overdue_amount)
-
-    // Find earliest unpaid installment
     const accInsts = installments
       .filter(i => i.family_fee_account_id === account.id && i.status !== 'Paid' && Number(i.amount_due) > 0)
       .sort((a, b) => a.due_date.localeCompare(b.due_date))
-    const next = accInsts[0]
-    if (next) return String(next.amount_due)
-
-    // No unpaid installment → blank
-    return ''
+    return accInsts[0] ? String(accInsts[0].amount_due) : ''
   }
 
   function openPayModal(account: Account) {
@@ -366,6 +351,7 @@ export default function FeesPage() {
     URL.revokeObjectURL(url)
   }
 
+  // ---- LEDGER DATA ----
   const ledgerFamily = useMemo(
     () => families.find(f => f.id === ledgerFamilyId) || null,
     [families, ledgerFamilyId]
@@ -388,6 +374,27 @@ export default function FeesPage() {
       .sort((a, b) => a.due_date.localeCompare(b.due_date)),
     [installments, ledgerAccount]
   )
+
+  // Admission payment = payments made in the admission month
+  const admissionPayment = useMemo(() => {
+    if (!ledgerAccount) return 0
+    const admDate = ledgerAccount.admission_date
+    const admYear = new Date(admDate).getFullYear()
+    const admMonth = new Date(admDate).getMonth()
+    return ledgerPayments
+      .filter(p => {
+        const d = new Date(p.paid_on)
+        return d.getFullYear() === admYear && d.getMonth() === admMonth
+      })
+      .reduce((s, p) => s + Number(p.amount), 0)
+  }, [ledgerAccount, ledgerPayments])
+
+  const ledgerInstallmentStats = useMemo(() => {
+    const total = ledgerInstallments.length
+    const overdue = ledgerInstallments.filter(i => i.due_date < todayISO()).length
+    const paid = ledgerInstallments.filter(i => i.status === 'Paid').length
+    return { total, overdue, paid }
+  }, [ledgerInstallments])
 
   if (loading) {
     return <AppShell userName={userName}><div style={{ padding: 40, textAlign: 'center', color: '#718096' }}>Loading fees…</div></AppShell>
@@ -642,7 +649,7 @@ export default function FeesPage() {
         </div>
       )}
 
-      {/* LEDGER DRAWER */}
+      {/* ===== LEDGER DRAWER ===== */}
       {ledgerFamily && ledgerAccount && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
@@ -652,75 +659,104 @@ export default function FeesPage() {
             style={{ width: '100%', maxWidth: 720, background: 'white', height: '100%', overflowY: 'auto', padding: 24 }}
             onClick={e => e.stopPropagation()}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
               <div>
                 <h3 style={{ margin: 0 }}>{ledgerFamily.family_name}</h3>
-                <div style={{ fontSize: '0.9rem', color: '#4a5568' }}>
+                <div style={{ fontSize: '0.9rem', color: '#4a5568', marginTop: 4 }}>
                   {ledgerFamily.primary_parent_name || '—'} · {ledgerFamily.primary_parent_phone || '—'}
                 </div>
-                <div style={{ marginTop: 6 }}>
+                <div style={{ marginTop: 8 }}>
                   {ledgerAccount.plan_type === 'annual'
-                    ? <span className="badge badge-blue">Annual plan</span>
-                    : <span className="badge badge-gray">Monthly plan</span>}
+                    ? <span className="badge badge-blue">Annual Plan</span>
+                    : <span className="badge badge-gray">Monthly Plan</span>}
                 </div>
               </div>
               <button className="btn btn-secondary" onClick={() => setLedgerFamilyId(null)}>Close</button>
             </div>
 
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>Children</div>
+            {/* Children */}
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontWeight: 600, marginBottom: 8, fontSize: '0.95rem' }}>Children</div>
               {ledgerChildren.map(k => (
-                <div key={k.id} style={{ padding: '6px 10px', background: '#f7fafc', borderRadius: 6, marginBottom: 4 }}>
+                <div key={k.id} style={{ padding: '8px 12px', background: '#f7fafc', borderRadius: 6, marginBottom: 4 }}>
                   <strong>{k.full_name}</strong> <span style={{ color: '#718096' }}>· {k.class_name}</span>
                 </div>
               ))}
             </div>
 
-            <div className="grid" style={{ marginBottom: 16 }}>
-              <div className="stat info">
-                <div className="label">Total Fee</div>
-                <div className="value">{formatRs(ledgerAccount.total_fee)}</div>
-              </div>
-              <div className="stat">
-                <div className="label">Paid</div>
-                <div className="value" style={{ color: '#2f855a' }}>{formatRs(ledgerAccount.paid_amount)}</div>
-              </div>
-              <div className="stat warning">
-                <div className="label">Balance</div>
-                <div className="value">{formatRs(ledgerAccount.balance)}</div>
+            {/* Fee Finalization */}
+            <div style={{ marginBottom: 20, padding: 14, background: '#f7fafc', borderRadius: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 10, fontSize: '0.95rem' }}>📋 Fee Finalization</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', fontSize: '0.9rem' }}>
+                <div style={{ color: '#4a5568' }}>Admission date</div>
+                <div style={{ textAlign: 'right', fontWeight: 600 }}>{formatDate(ledgerAccount.admission_date)}</div>
+                <div style={{ color: '#4a5568' }}>Total fee finalized</div>
+                <div style={{ textAlign: 'right', fontWeight: 600 }}>{formatRs(ledgerAccount.total_fee)}</div>
+                <div style={{ color: '#4a5568' }}>Paid at admission</div>
+                <div style={{ textAlign: 'right', fontWeight: 600 }}>{formatRs(admissionPayment)}</div>
               </div>
             </div>
 
-            {Number(ledgerAccount.overdue_amount) > 0 && (
-              <div style={{ padding: 12, background: '#fff5f5', border: '1px solid #fc8181', borderRadius: 6, marginBottom: 16 }}>
-                <div style={{ fontSize: '0.9rem' }}>
-                  <strong style={{ color: '#c53030' }}>⚠️ Overdue till date:</strong>{' '}
-                  <span style={{ color: '#c53030', fontWeight: 600 }}>{formatRs(ledgerAccount.overdue_amount)}</span>
+            {/* Payment Plan */}
+            <div style={{ marginBottom: 20, padding: 14, background: '#ebf8ff', borderRadius: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 10, fontSize: '0.95rem' }}>📅 Payment Plan</div>
+              {ledgerAccount.plan_type === 'monthly' ? (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', fontSize: '0.9rem' }}>
+                  <div style={{ color: '#4a5568' }}>Plan type</div>
+                  <div style={{ textAlign: 'right', fontWeight: 600 }}>Monthly</div>
+                  <div style={{ color: '#4a5568' }}>Installments</div>
+                  <div style={{ textAlign: 'right', fontWeight: 600 }}>
+                    {ledgerInstallmentStats.total} total · {ledgerInstallmentStats.overdue} overdue
+                  </div>
+                  <div style={{ color: '#4a5568' }}>Monthly installment</div>
+                  <div style={{ textAlign: 'right', fontWeight: 600 }}>{formatRsPrecise(ledgerAccount.monthly_installment)}</div>
                 </div>
-                <div style={{ fontSize: '0.85rem', color: '#4a5568', marginTop: 4 }}>
-                  Expected till date: {formatRs(ledgerAccount.expected_till_date)}
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', fontSize: '0.9rem' }}>
+                  <div style={{ color: '#4a5568' }}>Plan type</div>
+                  <div style={{ textAlign: 'right', fontWeight: 600 }}>Annual</div>
+                  <div style={{ color: '#4a5568' }}>Payment</div>
+                  <div style={{ textAlign: 'right' }}>As per parent's convenience</div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
 
-            {Number(ledgerAccount.balance) > 0 && ledgerAccount.plan_type === 'monthly' && (
-              <div style={{ padding: 12, background: '#ebf8ff', borderRadius: 6, fontSize: '0.9rem', marginBottom: 16 }}>
-                <strong>Monthly installment:</strong> {formatRsPrecise(ledgerAccount.monthly_installment)}
-                {ledgerInstallments.find(i => i.status !== 'Paid' && i.due_date > todayISO()) && (
+            {/* Progress */}
+            <div style={{ marginBottom: 20, padding: 14, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 10, fontSize: '0.95rem' }}>📊 Progress</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', fontSize: '0.9rem' }}>
+                <div style={{ color: '#4a5568' }}>Paid so far</div>
+                <div style={{ textAlign: 'right', fontWeight: 600, color: '#2f855a' }}>
+                  {formatRs(ledgerAccount.paid_amount)}
+                </div>
+
+                {ledgerAccount.plan_type === 'monthly' && (
                   <>
-                    {' · '}
-                    <strong>Next due:</strong> {formatDate(ledgerInstallments.find(i => i.status !== 'Paid' && i.due_date > todayISO())!.due_date)}
+                    <div style={{ color: '#4a5568' }}>Expected till date</div>
+                    <div style={{ textAlign: 'right', fontWeight: 600 }}>
+                      {formatRs(ledgerAccount.expected_till_date)}
+                    </div>
+
+                    {Number(ledgerAccount.overdue_amount) > 0 && (
+                      <>
+                        <div style={{ color: '#c53030', fontWeight: 600 }}>⚠️ Overdue till date</div>
+                        <div style={{ textAlign: 'right', fontWeight: 700, color: '#c53030' }}>
+                          {formatRs(ledgerAccount.overdue_amount)}
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
-              </div>
-            )}
 
-            {ledgerAccount.plan_type === 'annual' && Number(ledgerAccount.balance) > 0 && (
-              <div style={{ padding: 12, background: '#ebf8ff', borderRadius: 6, fontSize: '0.9rem', marginBottom: 16 }}>
-                <strong>Annual plan</strong> — record payments as they come.
+                <div style={{ color: '#4a5568' }}>Balance</div>
+                <div style={{ textAlign: 'right', fontWeight: 700 }}>
+                  {formatRs(ledgerAccount.balance)}
+                </div>
               </div>
-            )}
+            </div>
 
+            {/* Actions */}
             <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
               {canEdit && Number(ledgerAccount.balance) > 0 && (
                 <button className="btn btn-primary" onClick={() => { openPayModal(ledgerAccount); setLedgerFamilyId(null) }}>
@@ -728,13 +764,14 @@ export default function FeesPage() {
                 </button>
               )}
               <button className="btn btn-secondary" onClick={() => setLedgerShowPayments(!ledgerShowPayments)}>
-                {ledgerShowPayments ? '▼ Hide payment history' : '👁 View payment history'}
+                {ledgerShowPayments ? '▼ Hide Payment History' : '👁 Payment History'}
               </button>
             </div>
 
+            {/* Payment History */}
             {ledgerShowPayments && (
               <div>
-                <h4 style={{ marginTop: 0 }}>Payment History</h4>
+                <h4 style={{ marginTop: 0, marginBottom: 12 }}>Payment History</h4>
                 {ledgerPayments.length === 0 ? (
                   <p style={{ color: '#718096' }}>No payments recorded yet.</p>
                 ) : (
