@@ -93,15 +93,22 @@ function formatDate(iso: string | null) {
   return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
-function daysAgo(iso: string) {
-  const ms = Date.now() - new Date(iso).getTime()
-  return Math.floor(ms / (1000 * 60 * 60 * 24))
+// Parse "YYYY-MM-DD" without timezone surprises
+function parseISODate(iso: string): Date {
+  const [y, m, d] = iso.split('-').map(Number)
+  return new Date(y, m - 1, d)
 }
 
-// ISO week number for a date
-function weekNumber(d: Date): number {
-  const onejan = new Date(d.getFullYear(), 0, 1)
-  return Math.ceil((((d.getTime() - onejan.getTime()) / 86400000) + onejan.getDay() + 1) / 7)
+function startOfWeek(d: Date): Date {
+  const copy = new Date(d)
+  const day = copy.getDay() === 0 ? 7 : copy.getDay() // Sunday → 7
+  copy.setDate(copy.getDate() - day + 1) // Monday
+  copy.setHours(0, 0, 0, 0)
+  return copy
+}
+
+function shortLabel(d: Date): string {
+  return `${d.getDate()}/${d.getMonth() + 1}`
 }
 
 export default function StudentProfilePage() {
@@ -124,7 +131,6 @@ export default function StudentProfilePage() {
   const [comms, setComms] = useState<Communication[]>([])
   const [notes, setNotes] = useState<StudentNote[]>([])
 
-  // Add-note form
   const [showNoteForm, setShowNoteForm] = useState(false)
   const [noteText, setNoteText] = useState('')
   const [noteSaving, setNoteSaving] = useState(false)
@@ -161,7 +167,6 @@ export default function StudentProfilePage() {
         .neq('id', c.id)
       setSiblings((sibs as Child[]) || [])
 
-      // Account
       const { data: acc } = await supabase
         .from('family_fee_accounts').select('*').eq('family_id', c.family_id).maybeSingle()
       setAccount(acc as Account)
@@ -172,15 +177,15 @@ export default function StudentProfilePage() {
       .from('classes').select('*').eq('class_name', c.class_name).maybeSingle()
     setClassInfo(cls as ClassInfo)
 
-    // 4. Attendance — all records for this child (from admission to today)
-const { data: att } = await supabase
-  .from('attendance')
-  .select('id, child_id, attendance_date, status')
-  .eq('child_id', childId)
-  .order('attendance_date', { ascending: true })
-setAttendance((att as Attendance[]) || [])
+    // 4. Attendance — all records for this child
+    const { data: att } = await supabase
+      .from('attendance')
+      .select('id, child_id, attendance_date, status')
+      .eq('child_id', childId)
+      .order('attendance_date', { ascending: true })
+    setAttendance((att as Attendance[]) || [])
 
-    // 5. Progress notes (last 5)
+    // 5. Progress (last 5)
     const { data: prog } = await supabase
       .from('progress_notes').select('*')
       .eq('child_id', childId)
@@ -229,36 +234,48 @@ setAttendance((att as Attendance[]) || [])
     return { present, absent, late, total, rate }
   }, [attendance])
 
-  // Weekly buckets for last 12 weeks
+  // Weekly buckets: from earliest attendance → today
   const weeklyData = useMemo(() => {
     if (attendance.length === 0) return []
 
-    const buckets = new Map<string, { present: number; total: number; label: string }>()
-
-    // Build 12 weeks back from today
+    // Find earliest date
+    const dates = attendance.map(a => parseISODate(a.attendance_date))
+    const earliest = new Date(Math.min(...dates.map(d => d.getTime())))
     const today = new Date()
-    for (let i = 11; i >= 0; i--) {
-      const weekStart = new Date(today)
-      weekStart.setDate(today.getDate() - (i * 7) - today.getDay() + 1) // Monday
-      const key = weekStart.toISOString().slice(0, 10)
-      const label = `${weekStart.getDate()}/${weekStart.getMonth() + 1}`
-      buckets.set(key, { present: 0, total: 0, label })
-    }
+    today.setHours(0, 0, 0, 0)
 
+    // Build buckets from the week of earliest date → current week
+    const buckets: { weekStart: string; label: string; present: number; total: number; pct: number }[] = []
+    const cursor = startOfWeek(earliest)
+    const endCursor = startOfWeek(today)
+
+    // Precompute per-week aggregation from attendance
+    const aggByWeek = new Map<string, { present: number; total: number }>()
     attendance.forEach(a => {
-      const d = new Date(a.attendance_date)
-      // Find week start (Monday)
-      const day = d.getDay() === 0 ? 7 : d.getDay() // Sun → 7
-      const weekStart = new Date(d)
-      weekStart.setDate(d.getDate() - day + 1)
-      const key = weekStart.toISOString().slice(0, 10)
-      const bucket = buckets.get(key)
-      if (!bucket) return
-      bucket.total += 1
-      if (a.status === 'Present') bucket.present += 1
+      const d = parseISODate(a.attendance_date)
+      const w = startOfWeek(d)
+      const key = w.toISOString().slice(0, 10)
+      const agg = aggByWeek.get(key) || { present: 0, total: 0 }
+      agg.total += 1
+      if (a.status === 'Present') agg.present += 1
+      aggByWeek.set(key, agg)
     })
 
-    return Array.from(buckets.values())
+    while (cursor <= endCursor) {
+      const key = cursor.toISOString().slice(0, 10)
+      const agg = aggByWeek.get(key) || { present: 0, total: 0 }
+      const pct = agg.total > 0 ? Math.round((agg.present / agg.total) * 100) : -1 // -1 = no data
+      buckets.push({
+        weekStart: key,
+        label: shortLabel(cursor),
+        present: agg.present,
+        total: agg.total,
+        pct,
+      })
+      cursor.setDate(cursor.getDate() + 7)
+    }
+
+    return buckets
   }, [attendance])
 
   if (loading) {
@@ -378,10 +395,12 @@ setAttendance((att as Attendance[]) || [])
           <div><strong style={{ fontSize: '1.4rem', color: '#dd6b20' }}>{stats.late}</strong> <span style={{ color: '#718096' }}>Late</span></div>
           <div><strong style={{ fontSize: '1.4rem', color: '#2b6cb0' }}>{stats.rate}%</strong> <span style={{ color: '#718096' }}>Rate</span></div>
         </div>
-        {weeklyData.length > 0 && weeklyData.some(w => w.total > 0) ? (
+        {weeklyData.length > 0 ? (
           <div style={{ background: '#f7fafc', padding: 16, borderRadius: 8 }}>
-            <div style={{ fontSize: '0.85rem', color: '#4a5568', marginBottom: 8 }}>Weekly attendance % (last 12 weeks)</div>
-            <WeeklyChart data={weeklyData} />
+            <div style={{ fontSize: '0.85rem', color: '#4a5568', marginBottom: 8 }}>
+              Weekly attendance % ({weeklyData[0].label} → today)
+            </div>
+            <WeeklyLineChart data={weeklyData} />
           </div>
         ) : (
           <p style={{ color: '#718096' }}>No attendance records yet.</p>
@@ -485,54 +504,67 @@ setAttendance((att as Attendance[]) || [])
   )
 }
 
-// ---------- INLINE CHART ----------
-function WeeklyChart({ data }: { data: { present: number; total: number; label: string }[] }) {
-  const W = 640
-  const H = 160
-  const padX = 30
-  const padY = 20
-
+// ---------- LINE CHART ----------
+function WeeklyLineChart({ data }: { data: { label: string; pct: number; total: number }[] }) {
+  const W = Math.max(640, data.length * 45)
+  const H = 200
+  const padX = 40
+  const padY = 30
   const innerW = W - padX * 2
   const innerH = H - padY * 2
-  const n = data.length
-  const stepX = n > 1 ? innerW / (n - 1) : 0
 
+  // Filter out weeks with no data (pct = -1) for the polyline, but keep labels
   const points = data.map((d, i) => {
-    const pct = d.total > 0 ? (d.present / d.total) * 100 : 0
-    const x = padX + i * stepX
-    const y = padY + innerH - (pct / 100) * innerH
-    return { x, y, pct, label: d.label }
+    const x = padX + (data.length > 1 ? (i / (data.length - 1)) * innerW : innerW / 2)
+    const y = d.pct >= 0 ? padY + innerH - (d.pct / 100) * innerH : null
+    return { x, y, pct: d.pct, label: d.label, total: d.total }
   })
 
-  const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
+  // Build path skipping nulls
+  let pathD = ''
+  let started = false
+  points.forEach(p => {
+    if (p.y === null) { started = false; return }
+    pathD += (started ? ' L ' : ' M ') + p.x + ' ' + p.y
+    started = true
+  })
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', maxHeight: 220 }}>
-      {/* gridlines at 0, 50, 100% */}
-      {[0, 50, 100].map(p => {
-        const y = padY + innerH - (p / 100) * innerH
-        return (
-          <g key={p}>
-            <line x1={padX} y1={y} x2={W - padX} y2={y} stroke="#e2e8f0" strokeWidth="1" />
-            <text x={padX - 6} y={y + 4} textAnchor="end" fontSize="10" fill="#a0aec0">{p}</text>
+    <div style={{ overflowX: 'auto' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: W, height: H, display: 'block' }}>
+        {/* gridlines */}
+        {[0, 25, 50, 75, 100].map(p => {
+          const y = padY + innerH - (p / 100) * innerH
+          return (
+            <g key={p}>
+              <line x1={padX} y1={y} x2={W - padX} y2={y} stroke="#e2e8f0" strokeWidth="1" />
+              <text x={padX - 6} y={y + 4} textAnchor="end" fontSize="10" fill="#a0aec0">{p}</text>
+            </g>
+          )
+        })}
+
+        {/* line */}
+        {pathD && <path d={pathD} fill="none" stroke="#2b6cb0" strokeWidth="2.5" />}
+
+        {/* points */}
+        {points.map((p, i) => (
+          <g key={i}>
+            {p.y !== null && (
+              <>
+                <circle cx={p.x} cy={p.y} r="4" fill="#2b6cb0" />
+                <title>{`Week of ${p.label}: ${p.pct}% (${p.total} records)`}</title>
+                <text x={p.x} y={p.y - 10} textAnchor="middle" fontSize="10" fill="#2b6cb0" fontWeight="600">
+                  {p.pct}%
+                </text>
+              </>
+            )}
+            {p.y === null && (
+              <text x={p.x} y={padY + innerH / 2} textAnchor="middle" fontSize="9" fill="#cbd5e0">–</text>
+            )}
+            <text x={p.x} y={H - 8} textAnchor="middle" fontSize="9" fill="#a0aec0">{p.label}</text>
           </g>
-        )
-      })}
-
-      {/* line */}
-      <path d={pathD} fill="none" stroke="#2b6cb0" strokeWidth="2" />
-
-      {/* points */}
-      {points.map((p, i) => (
-        <g key={i}>
-          <circle cx={p.x} cy={p.y} r="3" fill="#2b6cb0" />
-          {p.pct > 0 && p.pct < 100 && (
-            <text x={p.x} y={p.y - 8} textAnchor="middle" fontSize="9" fill="#2b6cb0">{Math.round(p.pct)}</text>
-          )}
-          {/* label under axis */}
-          <text x={p.x} y={H - 4} textAnchor="middle" fontSize="9" fill="#a0aec0">{p.label}</text>
-        </g>
-      ))}
-    </svg>
+        ))}
+      </svg>
+    </div>
   )
 }
