@@ -6,7 +6,6 @@ import AppShell from '@/components/AppShell'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 
-// ---------- TYPES ----------
 type Family = {
   id: string
   family_name: string
@@ -32,6 +31,8 @@ type Account = {
   balance: number
   monthly_installment: number
   plan_type: 'monthly' | 'annual'
+  expected_till_date: number
+  overdue_amount: number
   notes: string | null
 }
 
@@ -62,13 +63,11 @@ type FamilyRow = {
   children: Child[]
   classes: string
   nextDue: Installment | null
-  displayStatus: 'Paid' | 'Pending' | 'Overdue' | 'Follow-up'
-  oldestOverdueDate: string | null
+  displayStatus: 'Paid' | 'Pending' | 'Overdue' | 'Pending (Annual)'
 }
 
 type Banner = { type: 'success' | 'error'; message: string } | null
 
-// ---------- HELPERS ----------
 const todayISO = () => new Date().toISOString().slice(0, 10)
 
 function formatRs(n: number) {
@@ -106,14 +105,12 @@ export default function FeesPage() {
   const [payments, setPayments] = useState<Payment[]>([])
   const [installments, setInstallments] = useState<Installment[]>([])
 
-  // Filters
   const [search, setSearch] = useState('')
   const [filterClass, setFilterClass] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [filterPlan, setFilterPlan] = useState('')
   const [showPaid, setShowPaid] = useState(false)
 
-  // Record Payment modal
   const [payModalAccount, setPayModalAccount] = useState<Account | null>(null)
   const [payAmount, setPayAmount] = useState('')
   const [payMethod, setPayMethod] = useState('Cash')
@@ -121,11 +118,9 @@ export default function FeesPage() {
   const [payNote, setPayNote] = useState('')
   const [paySaving, setPaySaving] = useState(false)
 
-  // Ledger drawer
   const [ledgerFamilyId, setLedgerFamilyId] = useState<string | null>(null)
   const [ledgerShowPayments, setLedgerShowPayments] = useState(false)
 
-  // Edit total fee modal
   const [editAccount, setEditAccount] = useState<Account | null>(null)
   const [editTotal, setEditTotal] = useState('')
   const [editReason, setEditReason] = useState('')
@@ -178,7 +173,6 @@ export default function FeesPage() {
     setTimeout(() => setBanner(null), 4000)
   }
 
-  // ---------- ROWS ----------
   const rows: FamilyRow[] = useMemo(() => {
     const childrenByFamily = new Map<string, Child[]>()
     children.forEach(c => {
@@ -208,15 +202,11 @@ export default function FeesPage() {
 
       const nextDue = acc.plan_type === 'monthly' ? (accInsts[0] || null) : null
 
-      const overdueInsts = acc.plan_type === 'monthly'
-        ? accInsts.filter(i => i.due_date < todayISO())
-        : []
-      const oldestOverdueDate = overdueInsts[0]?.due_date || null
-
-      let displayStatus: 'Paid' | 'Pending' | 'Overdue' | 'Follow-up' = 'Pending'
+      let displayStatus: 'Paid' | 'Pending' | 'Overdue' | 'Pending (Annual)' = 'Pending'
       if (Number(acc.balance) <= 0) displayStatus = 'Paid'
-      else if (acc.plan_type === 'annual') displayStatus = 'Follow-up'
-      else if (overdueInsts.length > 0) displayStatus = 'Overdue'
+      else if (acc.plan_type === 'annual') displayStatus = 'Pending (Annual)'
+      else if (Number(acc.overdue_amount) > 0) displayStatus = 'Overdue'
+      else displayStatus = 'Pending'
 
       out.push({
         family: fam,
@@ -225,13 +215,11 @@ export default function FeesPage() {
         classes,
         nextDue,
         displayStatus,
-        oldestOverdueDate,
       })
     })
     return out
   }, [families, children, accounts, installments])
 
-  // ---------- FILTERS ----------
   const availableClasses = useMemo(() => {
     const s = new Set<string>()
     children.forEach(c => c.is_active && s.add(c.class_name))
@@ -253,10 +241,11 @@ export default function FeesPage() {
     })
 
     list.sort((a, b) => {
-      const aOD = a.oldestOverdueDate || '9999-12-31'
-      const bOD = b.oldestOverdueDate || '9999-12-31'
-      if (aOD !== bOD) return aOD.localeCompare(bOD)
-      if (a.account.balance !== b.account.balance) return b.account.balance - a.account.balance
+      const aOD = Number(a.account.overdue_amount) > 0 ? 0 : 1
+      const bOD = Number(b.account.overdue_amount) > 0 ? 0 : 1
+      if (aOD !== bOD) return aOD - bOD
+      if (a.account.overdue_amount !== b.account.overdue_amount)
+        return b.account.overdue_amount - a.account.overdue_amount
       return a.family.family_name.localeCompare(b.family.family_name)
     })
     return list
@@ -266,17 +255,33 @@ export default function FeesPage() {
     const expected = filtered.reduce((s, r) => s + Number(r.account.total_fee), 0)
     const collected = filtered.reduce((s, r) => s + Number(r.account.paid_amount), 0)
     const outstanding = filtered.reduce((s, r) => s + Number(r.account.balance), 0)
-    const overdue = filtered.filter(r => r.displayStatus === 'Overdue').length
-    return { expected, collected, outstanding, overdue }
+    const overdueAmount = filtered.reduce((s, r) => s + Number(r.account.overdue_amount), 0)
+    const overdueCount = filtered.filter(r => Number(r.account.overdue_amount) > 0).length
+    return { expected, collected, outstanding, overdueAmount, overdueCount }
   }, [filtered])
 
-  // ---------- PAYMENT ----------
+  function computePaySuggestion(account: Account) {
+    if (Number(account.balance) <= 0) return ''
+
+    if (account.plan_type === 'annual') return String(account.balance)
+
+    // Monthly: if overdue, use overdue; else current month's installment
+    if (Number(account.overdue_amount) > 0) return String(account.overdue_amount)
+
+    // Find earliest unpaid installment
+    const accInsts = installments
+      .filter(i => i.family_fee_account_id === account.id && i.status !== 'Paid' && Number(i.amount_due) > 0)
+      .sort((a, b) => a.due_date.localeCompare(b.due_date))
+    const next = accInsts[0]
+    if (next) return String(next.amount_due)
+
+    // No unpaid installment → blank
+    return ''
+  }
+
   function openPayModal(account: Account) {
     setPayModalAccount(account)
-    const suggested = account.plan_type === 'monthly'
-      ? (account.monthly_installment || account.balance)
-      : account.balance
-    setPayAmount(String(suggested))
+    setPayAmount(computePaySuggestion(account))
     setPayMethod('Cash')
     setPayDate(todayISO())
     setPayNote('')
@@ -308,7 +313,6 @@ export default function FeesPage() {
     await loadAll()
   }
 
-  // ---------- EDIT TOTAL ----------
   function openEdit(account: Account) {
     setEditAccount(account)
     setEditTotal(String(account.total_fee))
@@ -332,9 +336,8 @@ export default function FeesPage() {
     await loadAll()
   }
 
-  // ---------- CSV ----------
   function exportCSV() {
-    const header = ['Family','Parent','Phone','Plan','Classes','Children','Total Fee','Paid','Balance','Monthly','Next Due','Status']
+    const header = ['Family','Parent','Phone','Plan','Children','Total Fee','Paid','Balance','Overdue','Monthly','Next Due','Status']
     const esc = (v: unknown) => {
       const s = v == null ? '' : String(v)
       return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s
@@ -346,11 +349,11 @@ export default function FeesPage() {
         r.family.primary_parent_name || '',
         r.family.primary_parent_phone || '',
         r.account.plan_type,
-        r.classes,
         r.children.map(k => k.full_name).join(' | '),
         r.account.total_fee,
         r.account.paid_amount,
         r.account.balance,
+        r.account.overdue_amount,
         r.account.plan_type === 'monthly' ? r.account.monthly_installment : '',
         r.nextDue?.due_date || '',
         r.displayStatus,
@@ -363,7 +366,6 @@ export default function FeesPage() {
     URL.revokeObjectURL(url)
   }
 
-  // ---------- LEDGER ----------
   const ledgerFamily = useMemo(
     () => families.find(f => f.id === ledgerFamilyId) || null,
     [families, ledgerFamilyId]
@@ -397,9 +399,7 @@ export default function FeesPage() {
         <h2>Fee Tracker</h2>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {canEdit && (
-            <Link href="/admissions" className="btn btn-primary">
-              + New Admission
-            </Link>
+            <Link href="/admissions" className="btn btn-primary">+ New Admission</Link>
           )}
         </div>
       </div>
@@ -428,8 +428,8 @@ export default function FeesPage() {
             <div className="value">{formatRs(summary.outstanding)}</div>
           </div>
           <div className="stat danger">
-            <div className="label">Overdue families</div>
-            <div className="value">{summary.overdue}</div>
+            <div className="label">Overdue</div>
+            <div className="value">{formatRs(summary.overdueAmount)}</div>
           </div>
         </div>
 
@@ -438,7 +438,7 @@ export default function FeesPage() {
             <label>Search</label>
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Family, parent, phone, child…" />
           </div>
-          <div className="form-group" style={{ marginBottom: 0, minWidth: 130 }}>
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 120 }}>
             <label>Plan</label>
             <select value={filterPlan} onChange={e => setFilterPlan(e.target.value)}>
               <option value="">All</option>
@@ -453,25 +453,25 @@ export default function FeesPage() {
               {availableClasses.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </div>
-          <div className="form-group" style={{ marginBottom: 0, minWidth: 130 }}>
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 150 }}>
             <label>Status</label>
             <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
               <option value="">All</option>
               <option value="Overdue">Overdue</option>
-              <option value="Pending">Pending</option>
-              <option value="Follow-up">Follow-up (Annual)</option>
+              <option value="Pending">Pending (Monthly)</option>
+              <option value="Pending (Annual)">Pending (Annual)</option>
               <option value="Paid">Paid</option>
             </select>
           </div>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.9rem', marginTop: 18, cursor: 'pointer' }}>
             <input type="checkbox" checked={showPaid} onChange={e => setShowPaid(e.target.checked)} />
-            Show paid families
+            Show paid
           </label>
           <button className="btn btn-secondary" onClick={exportCSV}>⬇ CSV</button>
         </div>
 
         <div className="card-title" style={{ marginTop: 0 }}>
-          Showing {filtered.length} families · {formatRs(summary.outstanding)} outstanding
+          Showing {filtered.length} families · {formatRs(summary.outstanding)} outstanding · {formatRs(summary.overdueAmount)} overdue
         </div>
 
         {filtered.length === 0 ? (
@@ -488,18 +488,18 @@ export default function FeesPage() {
                   <th>Family</th>
                   <th>Children</th>
                   <th>Plan</th>
-                  <th>Total Fee</th>
+                  <th>Total</th>
                   <th>Paid</th>
                   <th>Balance</th>
+                  <th>Overdue</th>
                   <th>Monthly</th>
-                  <th>Next Due</th>
                   <th>Status</th>
                   <th style={{ width: 220 }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.map(r => (
-                  <tr key={r.family.id}>
+                  <tr key={r.family.id} style={{ background: Number(r.account.overdue_amount) > 0 ? '#fff5f5' : undefined }}>
                     <td>
                       <div><strong>{r.family.family_name}</strong></div>
                       <div style={{ fontSize: '0.8rem', color: '#718096' }}>
@@ -523,24 +523,19 @@ export default function FeesPage() {
                     <td style={{ color: Number(r.account.balance) > 0 ? '#c53030' : '#2f855a', fontWeight: 600 }}>
                       {formatRs(r.account.balance)}
                     </td>
+                    <td style={{ color: Number(r.account.overdue_amount) > 0 ? '#c53030' : '#a0aec0', fontWeight: 600 }}>
+                      {Number(r.account.overdue_amount) > 0 ? formatRs(r.account.overdue_amount) : '—'}
+                    </td>
                     <td>
                       {r.account.plan_type === 'monthly' && Number(r.account.balance) > 0
                         ? formatRsPrecise(r.account.monthly_installment)
                         : '—'}
                     </td>
                     <td>
-                      {r.nextDue ? (
-                        <div>
-                          <div style={{ fontSize: '0.85rem' }}>{formatDate(r.nextDue.due_date)}</div>
-                          <div style={{ fontSize: '0.75rem', color: '#718096' }}>{monthLabel(r.nextDue.month_year)}</div>
-                        </div>
-                      ) : '—'}
-                    </td>
-                    <td>
                       {r.displayStatus === 'Paid' && <span className="badge badge-green">✓ Paid</span>}
                       {r.displayStatus === 'Pending' && <span className="badge badge-yellow">Pending</span>}
                       {r.displayStatus === 'Overdue' && <span className="badge badge-red">⚠️ Overdue</span>}
-                      {r.displayStatus === 'Follow-up' && <span className="badge badge-blue">📌 Follow-up</span>}
+                      {r.displayStatus === 'Pending (Annual)' && <span className="badge badge-blue">Pending (Annual)</span>}
                     </td>
                     <td>
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -565,7 +560,7 @@ export default function FeesPage() {
         )}
       </div>
 
-      {/* ---------- RECORD PAYMENT MODAL ---------- */}
+      {/* RECORD PAYMENT MODAL */}
       {payModalAccount && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
@@ -578,8 +573,8 @@ export default function FeesPage() {
                 {' '}<span style={{ textTransform: 'capitalize' }}>{payModalAccount.plan_type}</span> plan
               </div>
               <div>Balance: <strong>{formatRs(payModalAccount.balance)}</strong>
-                {payModalAccount.plan_type === 'monthly' && payModalAccount.monthly_installment > 0 && (
-                  <> · Monthly: <strong>{formatRsPrecise(payModalAccount.monthly_installment)}</strong></>
+                {Number(payModalAccount.overdue_amount) > 0 && (
+                  <> · Overdue: <strong style={{ color: '#c53030' }}>{formatRs(payModalAccount.overdue_amount)}</strong></>
                 )}
               </div>
             </div>
@@ -618,7 +613,7 @@ export default function FeesPage() {
         </div>
       )}
 
-      {/* ---------- EDIT TOTAL MODAL ---------- */}
+      {/* EDIT TOTAL MODAL */}
       {editAccount && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
@@ -627,7 +622,7 @@ export default function FeesPage() {
           <div className="card" style={{ maxWidth: 460, width: '100%', margin: 0 }}>
             <div className="card-title">✏️ Edit Total Fee</div>
             <p style={{ fontSize: '0.85rem', color: '#4a5568', marginTop: 0 }}>
-              Use for special adjustments, year-end discounts, or corrections. Balance and installments recalculate automatically.
+              Use for special adjustments or corrections. Balance and schedule recalculate automatically.
             </p>
             <div className="form-group">
               <label>Total Fee (Rs) *</label>
@@ -635,7 +630,7 @@ export default function FeesPage() {
             </div>
             <div className="form-group">
               <label>Reason / Note</label>
-              <input value={editReason} onChange={e => setEditReason(e.target.value)} placeholder="e.g. Year-end discount of Rs 2000" />
+              <input value={editReason} onChange={e => setEditReason(e.target.value)} placeholder="e.g. Year-end discount" />
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button className="btn btn-secondary" onClick={() => setEditAccount(null)}>Cancel</button>
@@ -647,7 +642,7 @@ export default function FeesPage() {
         </div>
       )}
 
-      {/* ---------- LEDGER DRAWER ---------- */}
+      {/* LEDGER DRAWER */}
       {ledgerFamily && ledgerAccount && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
@@ -696,21 +691,33 @@ export default function FeesPage() {
               </div>
             </div>
 
-            {Number(ledgerAccount.balance) > 0 && (
+            {Number(ledgerAccount.overdue_amount) > 0 && (
+              <div style={{ padding: 12, background: '#fff5f5', border: '1px solid #fc8181', borderRadius: 6, marginBottom: 16 }}>
+                <div style={{ fontSize: '0.9rem' }}>
+                  <strong style={{ color: '#c53030' }}>⚠️ Overdue till date:</strong>{' '}
+                  <span style={{ color: '#c53030', fontWeight: 600 }}>{formatRs(ledgerAccount.overdue_amount)}</span>
+                </div>
+                <div style={{ fontSize: '0.85rem', color: '#4a5568', marginTop: 4 }}>
+                  Expected till date: {formatRs(ledgerAccount.expected_till_date)}
+                </div>
+              </div>
+            )}
+
+            {Number(ledgerAccount.balance) > 0 && ledgerAccount.plan_type === 'monthly' && (
               <div style={{ padding: 12, background: '#ebf8ff', borderRadius: 6, fontSize: '0.9rem', marginBottom: 16 }}>
-                {ledgerAccount.plan_type === 'monthly' ? (
+                <strong>Monthly installment:</strong> {formatRsPrecise(ledgerAccount.monthly_installment)}
+                {ledgerInstallments.find(i => i.status !== 'Paid' && i.due_date > todayISO()) && (
                   <>
-                    <strong>Monthly installment:</strong> {formatRsPrecise(ledgerAccount.monthly_installment)}
-                    {ledgerInstallments.find(i => i.status !== 'Paid') && (
-                      <>
-                        {' · '}
-                        <strong>Next due:</strong> {formatDate(ledgerInstallments.find(i => i.status !== 'Paid')!.due_date)}
-                      </>
-                    )}
+                    {' · '}
+                    <strong>Next due:</strong> {formatDate(ledgerInstallments.find(i => i.status !== 'Paid' && i.due_date > todayISO())!.due_date)}
                   </>
-                ) : (
-                  <><strong>Annual plan</strong> — no fixed monthly schedule. Record payments as they come.</>
                 )}
+              </div>
+            )}
+
+            {ledgerAccount.plan_type === 'annual' && Number(ledgerAccount.balance) > 0 && (
+              <div style={{ padding: 12, background: '#ebf8ff', borderRadius: 6, fontSize: '0.9rem', marginBottom: 16 }}>
+                <strong>Annual plan</strong> — record payments as they come.
               </div>
             )}
 
