@@ -20,6 +20,8 @@ type Account = {
   balance: number
   monthly_installment: number
   plan_type: 'monthly' | 'annual'
+  expected_till_date: number
+  overdue_amount: number
 }
 
 type Installment = {
@@ -57,6 +59,10 @@ function formatRs(n: number) {
   return 'Rs ' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })
 }
 
+function formatRsPrecise(n: number) {
+  return 'Rs ' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })
+}
+
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
 }
@@ -87,12 +93,9 @@ export default function RemindersPage() {
   const [children, setChildren] = useState<Child[]>([])
   const [payments, setPayments] = useState<Payment[]>([])
 
-  // Filters
   const [search, setSearch] = useState('')
   const [filterType, setFilterType] = useState<'' | 'monthly' | 'annual' | 'overdue'>('')
-  const [showOverdueOnly, setShowOverdueOnly] = useState(false)
 
-  // Payment modal
   const [payModalAccount, setPayModalAccount] = useState<Account | null>(null)
   const [payAmount, setPayAmount] = useState('')
   const [payMethod, setPayMethod] = useState('Cash')
@@ -100,7 +103,6 @@ export default function RemindersPage() {
   const [payNote, setPayNote] = useState('')
   const [paySaving, setPaySaving] = useState(false)
 
-  // History modal
   const [historyFamilyId, setHistoryFamilyId] = useState<string | null>(null)
 
   const canEdit = role === 'director' || role === 'coordinator' || role === 'office'
@@ -148,45 +150,35 @@ export default function RemindersPage() {
     setTimeout(() => setBanner(null), 4000)
   }
 
-  // ---------- DERIVED ROWS ----------
   type Row = {
     kind: 'monthly' | 'annual'
     family: Family
     account: Account
-    installment: Installment | null   // monthly only
+    nextInstallment: Installment | null   // monthly only
     children: Child[]
     isOverdue: boolean
-    isThisMonth: boolean
     lastPaymentDate: string | null
   }
 
   const rows: Row[] = useMemo(() => {
-    const today = todayISO()
-    const currentMonth = today.slice(0, 7)
-    const accountsById = new Map(accounts.map(a => [a.id, a]))
     const familiesById = new Map(families.map(f => [f.id, f]))
 
-    // Oldest unpaid installment per account (monthly only)
-    const oldestByAccount = new Map<string, Installment>()
-    installments.forEach(i => {
-      if (i.status === 'Paid') return
-      const existing = oldestByAccount.get(i.family_fee_account_id)
-      if (!existing || i.due_date < existing.due_date) {
-        oldestByAccount.set(i.family_fee_account_id, i)
-      }
-    })
-
-    // Last payment date per family
     const lastPayByFamily = new Map<string, string>()
     payments.forEach(p => {
       const cur = lastPayByFamily.get(p.family_id)
       if (!cur || p.paid_on > cur) lastPayByFamily.set(p.family_id, p.paid_on)
     })
 
-    const out: Row[] = []
+    const installsByAccount = new Map<string, Installment[]>()
+    installments.forEach(i => {
+      const arr = installsByAccount.get(i.family_fee_account_id) || []
+      arr.push(i)
+      installsByAccount.set(i.family_fee_account_id, arr)
+    })
 
+    const out: Row[] = []
     accounts.forEach(account => {
-      if (Number(account.balance) <= 0) return // settled — skip
+      if (Number(account.balance) <= 0) return  // settled → skip
 
       const family = familiesById.get(account.family_id)
       if (!family) return
@@ -194,38 +186,33 @@ export default function RemindersPage() {
       const lastPay = lastPayByFamily.get(family.id) || null
 
       if (account.plan_type === 'monthly') {
-        const inst = oldestByAccount.get(account.id)
-        if (!inst) return // no unpaid installment
-        const instMonth = inst.due_date.slice(0, 7)
+        const unpaid = (installsByAccount.get(account.id) || [])
+          .filter(i => i.status !== 'Paid' && Number(i.amount_due) > 0)
+          .sort((a, b) => a.due_date.localeCompare(b.due_date))
         out.push({
           kind: 'monthly',
           family, account,
-          installment: inst,
+          nextInstallment: unpaid[0] || null,
           children: kids,
-          isOverdue: inst.due_date < today,
-          isThisMonth: instMonth === currentMonth,
+          isOverdue: Number(account.overdue_amount) > 0,
           lastPaymentDate: lastPay,
         })
       } else {
-        // annual, balance > 0
         out.push({
           kind: 'annual',
           family, account,
-          installment: null,
+          nextInstallment: null,
           children: kids,
           isOverdue: false,
-          isThisMonth: false,
           lastPaymentDate: lastPay,
         })
       }
     })
 
-    // Sort: overdue first, then monthly this-month, then others, then annual
     out.sort((a, b) => {
-      const aRank = a.isOverdue ? 0 : a.isThisMonth ? 1 : a.kind === 'monthly' ? 2 : 3
-      const bRank = b.isOverdue ? 0 : b.isThisMonth ? 1 : b.kind === 'monthly' ? 2 : 3
-      if (aRank !== bRank) return aRank - bRank
-      if (a.installment && b.installment) return a.installment.due_date.localeCompare(b.installment.due_date)
+      const aR = a.isOverdue ? 0 : a.kind === 'monthly' ? 1 : 2
+      const bR = b.isOverdue ? 0 : b.kind === 'monthly' ? 1 : 2
+      if (aR !== bR) return aR - bR
       return b.account.balance - a.account.balance
     })
     return out
@@ -234,7 +221,6 @@ export default function RemindersPage() {
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase()
     return rows.filter(r => {
-      if (showOverdueOnly && !r.isOverdue) return false
       if (filterType === 'overdue' && !r.isOverdue) return false
       if (filterType === 'monthly' && r.kind !== 'monthly') return false
       if (filterType === 'annual' && r.kind !== 'annual') return false
@@ -244,38 +230,60 @@ export default function RemindersPage() {
       }
       return true
     })
-  }, [rows, search, showOverdueOnly, filterType])
+  }, [rows, search, filterType])
 
   const stats = useMemo(() => {
-    const overdue = rows.filter(r => r.isOverdue).length
-    const thisMonth = rows.filter(r => r.isThisMonth).length
-    const monthly = rows.filter(r => r.kind === 'monthly').length
-    const annual = rows.filter(r => r.kind === 'annual').length
-    const totalDue = rows.reduce((s, r) => s + Number(r.account.balance), 0)
-    return { overdue, thisMonth, monthly, annual, totalDue }
+    const overdueCount = rows.filter(r => r.isOverdue).length
+    const overdueAmount = rows.reduce((s, r) => s + Number(r.account.overdue_amount), 0)
+    const monthlyCount = rows.filter(r => r.kind === 'monthly').length
+    const annualCount = rows.filter(r => r.kind === 'annual').length
+    const totalOutstanding = rows.reduce((s, r) => s + Number(r.account.balance), 0)
+    return { overdueCount, overdueAmount, monthlyCount, annualCount, totalOutstanding }
   }, [rows])
 
-  // ---------- WhatsApp ----------
   function buildWhatsAppMessage(r: Row) {
     const parent = r.family.primary_parent_name || 'Parent'
     const kidNames = r.children.map(k => k.full_name).join(' & ')
-    if (r.kind === 'monthly' && r.installment) {
-      const amount = Number(r.installment.amount_due).toLocaleString('en-IN')
-      const date = formatDate(r.installment.due_date)
+
+    if (r.kind === 'annual') {
+      const balance = Number(r.account.balance).toLocaleString('en-IN')
       return `Dear ${parent},
-
-This is a gentle reminder from Lilliput Play School that Rs ${amount} is due by ${date} for ${kidNames}'s fees.
-
-Thank you,
-Lilliput Play School`
-    }
-    // annual
-    const balance = Number(r.account.balance).toLocaleString('en-IN')
-    return `Dear ${parent},
 
 This is a gentle reminder from Lilliput Play School that Rs ${balance} is pending for ${kidNames}'s annual fees.
 
 Kindly let us know a convenient time to clear the balance.
+
+Thank you,
+Lilliput Play School`
+    }
+
+    if (Number(r.account.overdue_amount) > 0) {
+      const amt = Number(r.account.overdue_amount).toLocaleString('en-IN')
+      return `Dear ${parent},
+
+This is a gentle reminder from Lilliput Play School that Rs ${amt} is overdue for ${kidNames}'s fees as of today.
+
+Kindly clear the pending amount at your earliest convenience.
+
+Thank you,
+Lilliput Play School`
+    }
+
+    if (r.nextInstallment) {
+      const amt = Number(r.nextInstallment.amount_due).toLocaleString('en-IN')
+      const date = formatDate(r.nextInstallment.due_date)
+      return `Dear ${parent},
+
+This is a gentle reminder from Lilliput Play School that Rs ${amt} is due by ${date} for ${kidNames}'s fees.
+
+Thank you,
+Lilliput Play School`
+    }
+
+    const balance = Number(r.account.balance).toLocaleString('en-IN')
+    return `Dear ${parent},
+
+This is a gentle reminder from Lilliput Play School that Rs ${balance} is pending for ${kidNames}'s fees.
 
 Thank you,
 Lilliput Play School`
@@ -291,13 +299,19 @@ Lilliput Play School`
     }
   }
 
-  // ---------- PAYMENT ----------
+  function computePaySuggestion(account: Account) {
+    if (Number(account.balance) <= 0) return ''
+    if (account.plan_type === 'annual') return String(account.balance)
+    if (Number(account.overdue_amount) > 0) return String(account.overdue_amount)
+    const next = installments
+      .filter(i => i.family_fee_account_id === account.id && i.status !== 'Paid' && Number(i.amount_due) > 0)
+      .sort((a, b) => a.due_date.localeCompare(b.due_date))[0]
+    return next ? String(next.amount_due) : ''
+  }
+
   function openPayModal(account: Account) {
     setPayModalAccount(account)
-    const suggested = account.plan_type === 'monthly'
-      ? (account.monthly_installment || account.balance)
-      : account.balance
-    setPayAmount(String(suggested))
+    setPayAmount(computePaySuggestion(account))
     setPayMethod('Cash')
     setPayDate(todayISO())
     setPayNote('')
@@ -329,7 +343,6 @@ Lilliput Play School`
     await loadAll()
   }
 
-  // ---------- HISTORY ----------
   const historyPayments = useMemo(() => {
     if (!historyFamilyId) return []
     return payments
@@ -364,20 +377,20 @@ Lilliput Play School`
       <div className="card">
         <div className="grid" style={{ marginBottom: 16 }}>
           <div className="stat danger">
-            <div className="label">Overdue</div>
-            <div className="value">{stats.overdue}</div>
+            <div className="label">Overdue families</div>
+            <div className="value">{stats.overdueCount}</div>
           </div>
           <div className="stat warning">
-            <div className="label">This month (monthly)</div>
-            <div className="value">{stats.thisMonth}</div>
+            <div className="label">Overdue amount</div>
+            <div className="value">{formatRs(stats.overdueAmount)}</div>
           </div>
           <div className="stat info">
-            <div className="label">Annual follow-ups</div>
-            <div className="value">{stats.annual}</div>
+            <div className="label">Monthly pending</div>
+            <div className="value">{stats.monthlyCount}</div>
           </div>
           <div className="stat">
             <div className="label">Total outstanding</div>
-            <div className="value">{formatRs(stats.totalDue)}</div>
+            <div className="value">{formatRs(stats.totalOutstanding)}</div>
           </div>
         </div>
 
@@ -386,19 +399,15 @@ Lilliput Play School`
             <label>Search</label>
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Family, parent, phone, child…" />
           </div>
-          <div className="form-group" style={{ marginBottom: 0, minWidth: 180 }}>
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 200 }}>
             <label>Type</label>
             <select value={filterType} onChange={e => setFilterType(e.target.value as any)}>
               <option value="">All pending</option>
               <option value="overdue">Overdue only</option>
-              <option value="monthly">Monthly plan</option>
-              <option value="annual">Annual follow-up</option>
+              <option value="monthly">Monthly pending</option>
+              <option value="annual">Annual pending</option>
             </select>
           </div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.9rem', marginTop: 18, cursor: 'pointer' }}>
-            <input type="checkbox" checked={showOverdueOnly} onChange={e => setShowOverdueOnly(e.target.checked)} />
-            Overdue only
-          </label>
         </div>
 
         <div className="card-title" style={{ marginTop: 0 }}>
@@ -415,8 +424,9 @@ Lilliput Play School`
                   <th>Family</th>
                   <th>Children</th>
                   <th>Plan</th>
-                  <th>Details</th>
+                  <th>Overdue</th>
                   <th>Balance</th>
+                  <th>Next Due</th>
                   <th>Last Payment</th>
                   <th>Status</th>
                   <th style={{ width: 320 }}>Actions</th>
@@ -439,39 +449,43 @@ Lilliput Play School`
                         ? <span className="badge badge-blue">Annual</span>
                         : <span className="badge badge-gray">Monthly</span>}
                     </td>
-                    <td>
-                      {r.kind === 'monthly' && r.installment ? (
-                        <>
-                          <div><strong>{monthLabel(r.installment.month_year)}</strong> installment</div>
-                          <div style={{ fontSize: '0.78rem', color: '#718096' }}>
-                            Due {formatDate(r.installment.due_date)}
-                          </div>
-                        </>
-                      ) : (
-                        <div style={{ fontSize: '0.85rem', color: '#4a5568' }}>
-                          Annual plan — balance pending
-                        </div>
-                      )}
+                    <td style={{ color: Number(r.account.overdue_amount) > 0 ? '#c53030' : '#a0aec0', fontWeight: 600 }}>
+                      {Number(r.account.overdue_amount) > 0 ? formatRs(r.account.overdue_amount) : '—'}
                     </td>
                     <td style={{ fontWeight: 600 }}>{formatRs(r.account.balance)}</td>
                     <td style={{ fontSize: '0.85rem' }}>
+                      {r.nextInstallment ? (
+                        <>
+                          {formatDate(r.nextInstallment.due_date)}
+                          <div style={{ fontSize: '0.75rem', color: '#718096' }}>
+                            {monthLabel(r.nextInstallment.month_year)}
+                          </div>
+                        </>
+                      ) : '—'}
+                    </td>
+                    <td style={{ fontSize: '0.85rem' }}>
                       {r.lastPaymentDate
-                        ? <>{formatDate(r.lastPaymentDate)}<div style={{ fontSize: '0.75rem', color: '#718096' }}>{daysSince(r.lastPaymentDate)} days ago</div></>
+                        ? <>
+                            {formatDate(r.lastPaymentDate)}
+                            <div style={{ fontSize: '0.75rem', color: '#718096' }}>
+                              {daysSince(r.lastPaymentDate)} days ago
+                            </div>
+                          </>
                         : '—'}
                     </td>
                     <td>
                       {r.isOverdue
                         ? <span className="badge badge-red">⚠️ Overdue</span>
                         : r.kind === 'annual'
-                          ? <span className="badge badge-blue">📌 Follow-up</span>
-                          : <span className="badge badge-yellow">Pending</span>}
+                          ? <span className="badge badge-blue">Annual pending</span>
+                          : <span className="badge badge-yellow">Upcoming</span>}
                     </td>
                     <td>
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                         <button className="btn btn-sm btn-secondary" onClick={() => copyReminder(r)}>
                           📋 Copy reminder
                         </button>
-                        {canEdit && (
+                        {canEdit && Number(r.account.balance) > 0 && (
                           <button className="btn btn-sm btn-success" onClick={() => openPayModal(r.account)}>
                             💵 Pay
                           </button>
@@ -489,7 +503,7 @@ Lilliput Play School`
         )}
       </div>
 
-      {/* ---------- RECORD PAYMENT MODAL ---------- */}
+      {/* RECORD PAYMENT MODAL */}
       {payModalAccount && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
@@ -501,7 +515,11 @@ Lilliput Play School`
               <div><strong>{families.find(f => f.id === payModalAccount.family_id)?.family_name}</strong> ·
                 {' '}<span style={{ textTransform: 'capitalize' }}>{payModalAccount.plan_type}</span> plan
               </div>
-              <div>Balance: <strong>{formatRs(payModalAccount.balance)}</strong></div>
+              <div>Balance: <strong>{formatRs(payModalAccount.balance)}</strong>
+                {Number(payModalAccount.overdue_amount) > 0 && (
+                  <> · Overdue: <strong style={{ color: '#c53030' }}>{formatRs(payModalAccount.overdue_amount)}</strong></>
+                )}
+              </div>
             </div>
             <div className="form-row">
               <div className="form-group">
@@ -538,7 +556,7 @@ Lilliput Play School`
         </div>
       )}
 
-      {/* ---------- HISTORY MODAL ---------- */}
+      {/* HISTORY MODAL */}
       {historyFamilyId && historyFamily && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
