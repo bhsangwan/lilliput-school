@@ -21,11 +21,12 @@ type ClassInfo = {
   class_teacher_name: string | null
 }
 
-type Attendance = {
-  id: string
+type Summary = {
   child_id: string
-  attendance_date: string
-  status: 'Present' | 'Absent' | 'Late'
+  present_count: number
+  absent_count: number
+  late_count: number
+  total_count: number
 }
 
 type Row = {
@@ -37,22 +38,13 @@ type Row = {
   rate: number
 }
 
-const CLASS_OPTIONS = [
-  'Nursery A','Nursery B',
-  'LKG A','LKG B',
-  'UKG A','UKG B',
-  'Class_1 A','Class_1 B',
-  'Class_2 A','Class_2 B',
-  'Class_3 A','Class_3 B',
-]
-
 type Banner = { type: 'success' | 'error'; message: string } | null
 
 function rateColor(rate: number) {
-  if (rate >= 90) return { bar: '#48bb78', text: '#22543d', bg: '#f0fff4' }
-  if (rate >= 75) return { bar: '#ecc94b', text: '#744210', bg: '#fffaf0' }
-  if (rate >= 60) return { bar: '#ed8936', text: '#7b341e', bg: '#fffaf0' }
-  return { bar: '#f56565', text: '#742a2a', bg: '#fff5f5' }
+  if (rate >= 90) return { bar: '#48bb78', text: '#22543d' }
+  if (rate >= 75) return { bar: '#ecc94b', text: '#744210' }
+  if (rate >= 60) return { bar: '#ed8936', text: '#7b341e' }
+  return { bar: '#f56565', text: '#742a2a' }
 }
 
 export default function AttendancePage() {
@@ -66,13 +58,12 @@ export default function AttendancePage() {
 
   const [children, setChildren] = useState<Child[]>([])
   const [classes, setClasses] = useState<ClassInfo[]>([])
-  const [attendance, setAttendance] = useState<Attendance[]>([])
+  const [summary, setSummary] = useState<Summary[]>([])
 
-  // Filters
   const [filterClass, setFilterClass] = useState('')
   const [sortBy, setSortBy] = useState<'worst' | 'best' | 'name'>('worst')
 
-  // Add form (legacy — quick entry)
+  // Add form
   const [showAddForm, setShowAddForm] = useState(false)
   const [addChildId, setAddChildId] = useState('')
   const [addDate, setAddDate] = useState(new Date().toISOString().slice(0, 10))
@@ -91,57 +82,48 @@ export default function AttendancePage() {
         .from('profiles').select('full_name, role').eq('id', user.id).single()
       setUserName(profile?.full_name || '')
       setRole(profile?.role || '')
-
-      // Load children
-      const { data: kids } = await supabase
-        .from('children')
-        .select('id, full_name, class_name, family_id, admission_year, is_active')
-        .eq('is_active', true)
-        .order('full_name')
-      setChildren((kids as Child[]) || [])
-
-      // Load classes
-      const { data: cls } = await supabase.from('classes').select('*')
-      setClasses((cls as ClassInfo[]) || [])
-
-      // Load attendance (all — could be big, but we need it for the summary)
-      // To keep it fast, we only need Present/Absent counts per child.
-      // Supabase doesn't do group-by easily from client, so fetch rows and compute.
-      const { data: att } = await supabase
-        .from('attendance')
-        .select('id, child_id, attendance_date, status')
-      setAttendance((att as Attendance[]) || [])
-
+      await loadAll()
       setLoading(false)
     }
     init()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  async function loadAll() {
+    const { data: kids } = await supabase
+      .from('children')
+      .select('id, full_name, class_name, family_id, admission_year, is_active')
+      .eq('is_active', true)
+      .order('full_name')
+    setChildren((kids as Child[]) || [])
+
+    const { data: cls } = await supabase.from('classes').select('*')
+    setClasses((cls as ClassInfo[]) || [])
+
+    // Fetch only the aggregated summary — 240 rows max
+    const { data: sum } = await supabase.from('attendance_summary').select('*')
+    setSummary((sum as Summary[]) || [])
+  }
+
   function showBanner(type: 'success' | 'error', message: string) {
     setBanner({ type, message })
     setTimeout(() => setBanner(null), 4000)
   }
 
-  // Build rows: one per child with counts
   const rows: Row[] = useMemo(() => {
-    const attByChild = new Map<string, Attendance[]>()
-    attendance.forEach(a => {
-      const arr = attByChild.get(a.child_id) || []
-      arr.push(a)
-      attByChild.set(a.child_id, arr)
-    })
+    const byChild = new Map<string, Summary>()
+    summary.forEach(s => byChild.set(s.child_id, s))
 
     return children.map(c => {
-      const atts = attByChild.get(c.id) || []
-      const present = atts.filter(a => a.status === 'Present').length
-      const absent = atts.filter(a => a.status === 'Absent').length
-      const late = atts.filter(a => a.status === 'Late').length
+      const s = byChild.get(c.id)
+      const present = Number(s?.present_count || 0)
+      const absent = Number(s?.absent_count || 0)
+      const late = Number(s?.late_count || 0)
       const total = present + absent + late
       const rate = total > 0 ? Math.round((present / total) * 100) : 0
       return { child: c, present, absent, late, total, rate }
     })
-  }, [children, attendance])
+  }, [children, summary])
 
   const teacherByClass = useMemo(() => {
     const m = new Map<string, string>()
@@ -149,36 +131,29 @@ export default function AttendancePage() {
     return m
   }, [classes])
 
+  const availableClasses = useMemo(() => {
+    const s = new Set<string>()
+    children.forEach(c => s.add(c.class_name))
+    return Array.from(s).sort()
+  }, [children])
+
+  // Auto-select first class once
+  useEffect(() => {
+    if (!filterClass && availableClasses.length > 0) {
+      setFilterClass(availableClasses[0])
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [availableClasses.length])
+
   const filteredRows = useMemo(() => {
-    let list = rows
+    let list = filterClass ? rows.filter(r => r.child.class_name === filterClass) : rows
 
-    if (filterClass) {
-      list = list.filter(r => r.child.class_name === filterClass)
-    } else {
-      // Default: show a class if none chosen
-      // (We'll default to the first class in useEffect below)
-    }
-
-    // Sort
-    if (sortBy === 'worst') {
-      list = [...list].sort((a, b) => a.rate - b.rate)
-    } else if (sortBy === 'best') {
-      list = [...list].sort((a, b) => b.rate - a.rate)
-    } else {
-      list = [...list].sort((a, b) => a.child.full_name.localeCompare(b.child.full_name))
-    }
+    if (sortBy === 'worst') list = [...list].sort((a, b) => a.rate - b.rate)
+    else if (sortBy === 'best') list = [...list].sort((a, b) => b.rate - a.rate)
+    else list = [...list].sort((a, b) => a.child.full_name.localeCompare(b.child.full_name))
 
     return list
   }, [rows, filterClass, sortBy])
-
-  // Auto-select first class if none selected
-  useEffect(() => {
-    if (!filterClass && children.length > 0 && CLASS_OPTIONS.length > 0) {
-      const available = Array.from(new Set(children.map(c => c.class_name))).sort()
-      if (available.length > 0) setFilterClass(available[0])
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [children.length])
 
   const classSummary = useMemo(() => {
     const present = filteredRows.reduce((s, r) => s + r.present, 0)
@@ -189,7 +164,6 @@ export default function AttendancePage() {
     return { present, absent, late, total, avgRate }
   }, [filteredRows])
 
-  // Add record handler
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault()
     if (!addChildId || !addDate) return
@@ -212,19 +186,8 @@ export default function AttendancePage() {
     showBanner('success', 'Attendance recorded.')
     setShowAddForm(false)
     setAddNote('')
-
-    // Reload attendance
-    const { data: att } = await supabase
-      .from('attendance')
-      .select('id, child_id, attendance_date, status')
-    setAttendance((att as Attendance[]) || [])
+    await loadAll()
   }
-
-  const availableClasses = useMemo(() => {
-    const s = new Set<string>()
-    children.forEach(c => s.add(c.class_name))
-    return Array.from(s).sort()
-  }, [children])
 
   if (loading) {
     return <AppShell userName={userName}><div style={{ padding: 40, textAlign: 'center', color: '#718096' }}>Loading attendance…</div></AppShell>
@@ -252,7 +215,6 @@ export default function AttendancePage() {
         }}>{banner.message}</div>
       )}
 
-      {/* ADD FORM */}
       {showAddForm && canEdit && (
         <div className="card">
           <div className="card-title">Add / Update Attendance</div>
@@ -307,9 +269,7 @@ export default function AttendancePage() {
         </div>
       )}
 
-      {/* MAIN CARD */}
       <div className="card">
-        {/* Filters */}
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 16 }}>
           <div className="form-group" style={{ marginBottom: 0, minWidth: 180 }}>
             <label>Class</label>
@@ -328,7 +288,6 @@ export default function AttendancePage() {
           </div>
         </div>
 
-        {/* Class summary */}
         {filteredRows.length > 0 && (
           <div style={{
             background: '#f7fafc', padding: 12, borderRadius: 8, marginBottom: 16,
@@ -342,7 +301,6 @@ export default function AttendancePage() {
           </div>
         )}
 
-        {/* Table */}
         {filteredRows.length === 0 ? (
           <p style={{ color: '#718096' }}>No students found.</p>
         ) : (
@@ -376,17 +334,11 @@ export default function AttendancePage() {
                       <td style={{ fontSize: '0.85rem', color: '#4a5568' }}>
                         {teacherByClass.get(r.child.class_name) || '—'}
                       </td>
-                      <td style={{ textAlign: 'right', color: '#2f855a', fontWeight: 600 }}>
-                        {r.present}
-                      </td>
-                      <td style={{ textAlign: 'right', color: '#c53030', fontWeight: 600 }}>
-                        {r.absent}
-                      </td>
-                      <td style={{ textAlign: 'right', color: '#dd6b20', fontWeight: 600 }}>
-                        {r.late}
-                      </td>
+                      <td style={{ textAlign: 'right', color: '#2f855a', fontWeight: 600 }}>{r.present}</td>
+                      <td style={{ textAlign: 'right', color: '#c53030', fontWeight: 600 }}>{r.absent}</td>
+                      <td style={{ textAlign: 'right', color: '#dd6b20', fontWeight: 600 }}>{r.late}</td>
                       <td>
-                        <ProgressBar rate={r.rate} color={c.bar} />
+                        <ProgressBar rate={r.rate} color={c.bar} textColor={c.text} />
                       </td>
                     </tr>
                   )
@@ -400,20 +352,18 @@ export default function AttendancePage() {
   )
 }
 
-// ---------- PROGRESS BAR ----------
-function ProgressBar({ rate, color }: { rate: number; color: string }) {
+function ProgressBar({ rate, color, textColor }: { rate: number; color: string; textColor: string }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
       <div style={{
-        flex: 1, height: 18, background: '#e2e8f0', borderRadius: 9, overflow: 'hidden',
-        position: 'relative'
+        flex: 1, height: 18, background: '#e2e8f0', borderRadius: 9, overflow: 'hidden'
       }}>
         <div style={{
           width: `${rate}%`, height: '100%', background: color,
           transition: 'width 0.3s ease', borderRadius: 9
         }} />
       </div>
-      <span style={{ fontSize: '0.85rem', fontWeight: 600, minWidth: 40, textAlign: 'right', color }}>
+      <span style={{ fontSize: '0.85rem', fontWeight: 600, minWidth: 40, textAlign: 'right', color: textColor }}>
         {rate}%
       </span>
     </div>
