@@ -106,15 +106,24 @@ export default async function DashboardPage() {
         )}
       </div>
 
-      <div className="card">
-        <div className="card-title">Quick Actions</div>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <Link href="/attendance" className="btn btn-primary">Attendance</Link>
-          <Link href="/fees" className="btn btn-secondary">Fees</Link>
-          <Link href="/communication" className="btn btn-secondary">Parent Log</Link>
-          <Link href="/children" className="btn btn-secondary">Manage Children</Link>
-        </div>
-      </div>
+<div className="card">
+  <div className="card-title">💰 Fee Reminders</div>
+  <p style={{ color: '#4a5568', fontSize: '0.9rem', marginTop: 0 }}>
+    See which families have installments due or overdue, and send reminders in one click.
+  </p>
+  <Link href="/reminders" className="btn btn-primary">Open Reminders →</Link>
+</div>
+
+<div className="card">
+  <div className="card-title">Quick Actions</div>
+  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+    <Link href="/attendance" className="btn btn-primary">Attendance</Link>
+    <Link href="/fees" className="btn btn-secondary">Fees</Link>
+    <Link href="/reminders" className="btn btn-secondary">Reminders</Link>
+    <Link href="/communication" className="btn btn-secondary">Parent Log</Link>
+    <Link href="/children" className="btn btn-secondary">Manage Children</Link>
+  </div>
+</div>
     </AppShell>
   )
 }
