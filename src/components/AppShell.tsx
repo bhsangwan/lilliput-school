@@ -6,7 +6,7 @@ import { createClient } from '@/lib/supabase/client'
 
 const links = [
   { href: '/', label: 'Dashboard' },
-  { href: '/reminders', label: 'Reminders' },
+  { href: '/reminders', label: 'Fee Reminders' },
   { href: '/attendance', label: 'Attendance' },
   { href: '/fees', label: 'Fees' },
   { href: '/communication', label: 'Parent Log' },
