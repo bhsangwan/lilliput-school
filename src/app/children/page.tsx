@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import AppShell from '@/components/AppShell'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+
 
 type Child = {
   id: string
@@ -461,7 +463,11 @@ export default function ChildrenPage() {
                       const fam = c.family_id ? families.find(f => f.id === c.family_id) : null
                       return (
                         <tr key={c.id} style={{ opacity: c.is_active ? 1 : 0.55 }}>
-                          <td><strong>{c.full_name}</strong></td>
+                          <td>
+  <Link href={`/students/${c.id}`} style={{ color: '#2b6cb0', textDecoration: 'none', fontWeight: 600 }}>
+    {c.full_name}
+  </Link>
+</td>
                           <td>{c.class_name}</td>
                           <td>{c.parent_name || '—'}</td>
                           <td>{c.parent_phone || '—'}</td>
