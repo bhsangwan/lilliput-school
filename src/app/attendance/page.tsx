@@ -29,6 +29,13 @@ type Summary = {
   total_count: number
 }
 
+type LatestDay = {
+  date: string
+  present: number
+  absent: number
+  late: number
+}
+
 type Row = {
   child: Child
   present: number
@@ -47,6 +54,10 @@ function rateColor(rate: number) {
   return { bar: '#f56565', text: '#742a2a' }
 }
 
+function formatDateShort(iso: string) {
+  return new Date(iso).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' })
+}
+
 export default function AttendancePage() {
   const supabase = createClient()
   const router = useRouter()
@@ -59,11 +70,11 @@ export default function AttendancePage() {
   const [children, setChildren] = useState<Child[]>([])
   const [classes, setClasses] = useState<ClassInfo[]>([])
   const [summary, setSummary] = useState<Summary[]>([])
+  const [latestDay, setLatestDay] = useState<LatestDay | null>(null)
 
   const [filterClass, setFilterClass] = useState('')
   const [sortBy, setSortBy] = useState<'worst' | 'best' | 'name'>('worst')
 
-  // Add form
   const [showAddForm, setShowAddForm] = useState(false)
   const [addChildId, setAddChildId] = useState('')
   const [addDate, setAddDate] = useState(new Date().toISOString().slice(0, 10))
@@ -82,14 +93,14 @@ export default function AttendancePage() {
         .from('profiles').select('full_name, role').eq('id', user.id).single()
       setUserName(profile?.full_name || '')
       setRole(profile?.role || '')
-      await loadAll()
+      await loadBase()
       setLoading(false)
     }
     init()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  async function loadAll() {
+  async function loadBase() {
     const { data: kids } = await supabase
       .from('children')
       .select('id, full_name, class_name, family_id, admission_year, is_active')
@@ -100,10 +111,43 @@ export default function AttendancePage() {
     const { data: cls } = await supabase.from('classes').select('*')
     setClasses((cls as ClassInfo[]) || [])
 
-    // Fetch only the aggregated summary — 240 rows max
     const { data: sum } = await supabase.from('attendance_summary').select('*')
     setSummary((sum as Summary[]) || [])
   }
+
+  // Fetch latest day for a given class (or all classes)
+  async function loadLatestDay(classFilter: string) {
+    let query = supabase
+      .from('attendance_by_class_date')
+      .select('*')
+      .order('attendance_date', { ascending: false })
+      .limit(20)
+
+    if (classFilter) {
+      query = query.eq('class_name', classFilter)
+    }
+
+    const { data, error } = await query
+    if (error || !data || data.length === 0) { setLatestDay(null); return }
+
+    // Group by date and sum (for "all classes" case)
+    const latestDate = data[0].attendance_date
+    const rowsForDate = data.filter((r: any) => r.attendance_date === latestDate)
+
+    const present = rowsForDate.reduce((s: number, r: any) => s + Number(r.present_count || 0), 0)
+    const absent = rowsForDate.reduce((s: number, r: any) => s + Number(r.absent_count || 0), 0)
+    const late = rowsForDate.reduce((s: number, r: any) => s + Number(r.late_count || 0), 0)
+
+    setLatestDay({ date: latestDate, present, absent, late })
+  }
+
+  // Reload latest day when class filter changes
+  useEffect(() => {
+    if (filterClass !== undefined) {
+      loadLatestDay(filterClass)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterClass])
 
   function showBanner(type: 'success' | 'error', message: string) {
     setBanner({ type, message })
@@ -137,7 +181,6 @@ export default function AttendancePage() {
     return Array.from(s).sort()
   }, [children])
 
-  // Auto-select first class once
   useEffect(() => {
     if (!filterClass && availableClasses.length > 0) {
       setFilterClass(availableClasses[0])
@@ -186,7 +229,8 @@ export default function AttendancePage() {
     showBanner('success', 'Attendance recorded.')
     setShowAddForm(false)
     setAddNote('')
-    await loadAll()
+    await loadBase()
+    await loadLatestDay(filterClass)
   }
 
   if (loading) {
@@ -291,13 +335,19 @@ export default function AttendancePage() {
         {filteredRows.length > 0 && (
           <div style={{
             background: '#f7fafc', padding: 12, borderRadius: 8, marginBottom: 16,
-            display: 'flex', gap: 24, flexWrap: 'wrap', fontSize: '0.9rem'
+            display: 'flex', flexDirection: 'column', gap: 6, fontSize: '0.9rem'
           }}>
-            <div><strong>{filteredRows.length}</strong> students</div>
-            <div><span style={{ color: '#2f855a' }}><strong>{classSummary.present}</strong> Present</span></div>
-            <div><span style={{ color: '#c53030' }}><strong>{classSummary.absent}</strong> Absent</span></div>
-            <div><span style={{ color: '#dd6b20' }}><strong>{classSummary.late}</strong> Late</span></div>
-            <div>Average: <strong>{classSummary.avgRate}%</strong></div>
+            <div>
+              <strong>{filterClass || 'All classes'}</strong> · {filteredRows.length} students · Session average: <strong>{classSummary.avgRate}%</strong>
+            </div>
+            {latestDay && (
+              <div style={{ color: '#4a5568', fontSize: '0.85rem' }}>
+                Latest school day ({formatDateShort(latestDay.date)}):&nbsp;
+                <span style={{ color: '#2f855a', fontWeight: 600 }}>{latestDay.present} Present</span> ·&nbsp;
+                <span style={{ color: '#c53030', fontWeight: 600 }}>{latestDay.absent} Absent</span> ·&nbsp;
+                <span style={{ color: '#dd6b20', fontWeight: 600 }}>{latestDay.late} Late</span>
+              </div>
+            )}
           </div>
         )}
 
