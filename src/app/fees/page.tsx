@@ -408,7 +408,7 @@ export default function FeesPage() {
         <h2>Fee Tracker</h2>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {canEdit && (
-            <Link href="/admissions/new" className="btn btn-primary">
+            <Link href="/admissions" className="btn btn-primary">
               + New Admission
             </Link>
           )}
