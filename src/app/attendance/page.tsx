@@ -240,15 +240,20 @@ export default function AttendancePage() {
   return (
     <AppShell userName={userName}>
       <div className="page-header">
-        <h2>Attendance</h2>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {canEdit && (
-            <button className="btn btn-primary" onClick={() => setShowAddForm(!showAddForm)}>
-              {showAddForm ? 'Cancel' : '+ Add Record'}
-            </button>
-          )}
-        </div>
-      </div>
+  <h2>Attendance</h2>
+  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+    {canEdit && (
+      <Link href="/attendance/mark" className="btn btn-primary">
+        🖊 Mark Attendance
+      </Link>
+    )}
+    {canEdit && (
+      <button className="btn btn-secondary" onClick={() => setShowAddForm(!showAddForm)}>
+        {showAddForm ? 'Cancel' : '+ Add Record'}
+      </button>
+    )}
+  </div>
+</div>
 
       {banner && (
         <div style={{
